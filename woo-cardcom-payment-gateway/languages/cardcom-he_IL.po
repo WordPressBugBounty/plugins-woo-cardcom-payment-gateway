@@ -1,0 +1,411 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: \n"
+"POT-Creation-Date: 2022-01-30 18:22+0200\n"
+"PO-Revision-Date: 2022-01-30 18:22+0200\n"
+"Last-Translator: \n"
+"Language-Team: \n"
+"Language: he_IL\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"X-Generator: Poedit 3.0\n"
+"X-Poedit-Basepath: ..\n"
+"Plural-Forms: nplurals=4; plural=(n==1 ? 0 : n==2 ? 1 : n>10 && n%10==0 ? "
+"2 : 3);\n"
+"X-Poedit-KeywordsList: __;_e;esc_html__\n"
+"X-Poedit-SearchPath-0: cardcom.php\n"
+
+#: cardcom.php:61 cardcom.php:876
+msgid "CardCom"
+msgstr "קארדקום"
+
+#: cardcom.php:396
+msgid "Capture Charge: charging"
+msgstr "פעולת \"Capture Charge\" - מחייב מסגרת"
+
+#: cardcom.php:456
+msgid "Capture Charge - Charging completed successfully"
+msgstr "עסקה מושהית \"Capture Charge\" - מחייב מסגרת"
+
+#: cardcom.php:457
+msgid "Deal Number :"
+msgstr "מספר עסקה :"
+
+#: cardcom.php:463
+msgid "Capture Charge - Prevented charging customer more than once"
+msgstr "עסקה מושהית \"Capture Charge\" - נמנע חיוב עסקה כפולה"
+
+#: cardcom.php:466
+msgid "Capture Charge - Charging failed, please check error"
+msgstr "עסקה מושהית \"Capture Charge\" - חיוב נכשל, נא לבדוק פרטי שגיאה"
+
+#: cardcom.php:473
+msgid "Order was not payed via Cardcom payment gateway"
+msgstr "הזמנה לא שולמה דרך קארדקום"
+
+#: cardcom.php:530
+msgid "Postcode / ZIP"
+msgstr "מיקוד"
+
+#: cardcom.php:638
+msgid "Coupon code"
+msgstr "קוד קופון"
+
+#: cardcom.php:698
+msgid "Title"
+msgstr "כותרת"
+
+#: cardcom.php:700
+msgid "The title which the user sees during the checkout"
+msgstr "כותרת שתוצג למשתמש בדף ה-Checkout"
+
+#: cardcom.php:701 cardcom.php:2181 cardcom.php:2297 cardcom.php:2512
+#: cardcom.php:2519
+msgid "Cardcom"
+msgstr "קארדקום"
+
+#: cardcom.php:704
+msgid "Enable/Disable"
+msgstr "הפעל/כבה"
+
+#: cardcom.php:705
+msgid "Enable Cardcom"
+msgstr "מתג להפעלת התוסף קארדקום"
+
+#: cardcom.php:711
+msgid "Description"
+msgstr "תיאור"
+
+#: cardcom.php:713
+msgid "The description which the user sees during the checkout."
+msgstr "התיאור אשר המשתמש יראה בדף ה-Checkout."
+
+#: cardcom.php:717 cardcom.php:718
+msgid "Operation"
+msgstr "פעולה"
+
+#: cardcom.php:729
+msgid " - Charge Only - As stated"
+msgstr " - Charge Only - חיוב בלבד"
+
+#: cardcom.php:730
+msgid ""
+" - Charge and Save TOKEN - Saves token on order and optionally allows user "
+"to save token as saved payment method"
+msgstr ""
+" - חיוב וצור טוקן - מחייב עסקה ובנוסף יוצר טוקן/אסימון (שמירת פרטי כרטיס "
+"אשראי מוצפנים לשימוש חוזר) בהזמנה ואופציונלי למשתמש"
+
+#: cardcom.php:731
+msgid " - Save token (only) - Will only save payment method but not charge"
+msgstr " - יצירת אסימון בלבד - ייצור אסימון/טוקן אבל לא יחייב לקוח"
+
+#: cardcom.php:732
+msgid " - Suspended Deal J2 - Check deal Validity Only"
+msgstr " - J2 - הינו עסקת בדיקה בלבד"
+
+#: cardcom.php:733
+msgid ""
+" - Suspended Deal J5 - Capture a sum to later charge (Delayed deal). The "
+"charging is done in Cardcom"
+msgstr " - J5 - עסקת אישור הכוללת תפיסת מסגרת ללקוח (עסקה מושהית)"
+
+#: cardcom.php:734
+msgid ""
+" - Capture Charge - (Requires Cardcom's Token module + J5 authorization via "
+"acquirer)"
+msgstr ""
+" - Capture Charge - (דורש מודל אסימונים של קארדקום + הרשאת J5 מחברת האשראי "
+"הסולקת)"
+
+#: cardcom.php:735
+msgid "     The payment page will \"Capture\" a sum to later charge."
+msgstr "     דף התשלום \"יתפוס\" ללקוח מסגרת בכרטיס לחיוב במועד מאוחר יותר."
+
+#: cardcom.php:736
+msgid ""
+"     The charging will occur only once the order's status is changes to "
+"processing/completed."
+msgstr ""
+"     החיוב יבוצע בפועל *רק* לאחר עדכון סטטוס ההזמנה לסטטוס- בטיפול / הושלם "
+"(processing / completed)"
+
+#: cardcom.php:737
+msgid "For more questions, contact Cardcom support"
+msgstr " - לשאלות נוספות, צור קשר עם מחלקת תמיכה של קארדקום"
+
+#: cardcom.php:741 cardcom.php:742
+msgid "PCI certification"
+msgstr "הדלק תקן PCI"
+
+#: cardcom.php:744
+msgid ""
+"Check this if your website is PCI compliant, and credit card numbers can be "
+"passed through your servers.<br />If you are not sure, keep this unchecked."
+msgstr ""
+"סמן את זה אם לאתר יש תקן PCI ותאפשר להזנת פרטי אשראי בדף ה-Checkout (השרת "
+"האתר). אם אינך בטוח, השאר את זה *לא מסומן*."
+
+#: cardcom.php:749
+msgid "Send By Email"
+msgstr "שלח במייל"
+
+#: cardcom.php:752
+msgid "Send Invoice via Email"
+msgstr "שלח חשבונית במייל"
+
+#: cardcom.php:756 cardcom.php:757
+msgid "Invoice"
+msgstr "חשבונית"
+
+#: cardcom.php:760
+msgid "Select Yes only if account has document module"
+msgstr "בחר YES רק אם יש למשתמש קארדקום את מודול document"
+
+#: cardcom.php:764
+msgid "Terminal Number"
+msgstr "מספר מסוף"
+
+#: cardcom.php:766
+msgid "The company' Terminal Number. To test plugin, input \"1000\""
+msgstr "מספר המסוף של החברה. כדי להתנסות עם התוסף, הזן 1000"
+
+#: cardcom.php:770 cardcom.php:771
+msgid "Must CVV"
+msgstr "חייב CVV"
+
+#: cardcom.php:778
+msgid "CVV free Terminal Number"
+msgstr "מספר מסוף ללא CVV"
+
+#: cardcom.php:780
+msgid "CVV free Terminal"
+msgstr "מסוף ללא CVV"
+
+#: cardcom.php:784
+msgid "API User Name"
+msgstr "שם משתמש API"
+
+#: cardcom.php:786
+msgid "The company API User Name. To test API, input \"barak9611\""
+msgstr "שם משתמש ה-API של החבר'ה. כדי להתנסות עם התוסף, הזן \"barak9611\""
+
+#: cardcom.php:790
+msgid "Max Payment"
+msgstr "מקסימום תשלומים"
+
+#: cardcom.php:792
+msgid "Limit the amount of payments"
+msgstr "הגדר את כמות התשלומים המקסימלי שהמשתמש יכול לבחור"
+
+#: cardcom.php:796
+msgid "Currency"
+msgstr "מטבע"
+
+#: cardcom.php:798
+msgid "Currency: 0- Auto Detect,  1 - NIS , 2 - USD , else ISO Currency"
+msgstr ""
+"מטבע: 0 - זיהוי אוטומטי , 1 - שקל , 2 - דולר אמריקאי , אחרת הזן קוד מטבע ISO"
+
+#: cardcom.php:802
+msgid "Payment Gateway Language"
+msgstr "שפת דף תשלום"
+
+#: cardcom.php:804
+msgid "The language that will be displayed in cardcom's payment gateway page"
+msgstr "השפה שתוצג בדף תשלום של קארדקום"
+
+#: cardcom.php:808 cardcom.php:810
+msgid "Admin Email"
+msgstr "אימייל אדמין"
+
+#: cardcom.php:814 cardcom.php:815
+msgid "Use Iframe"
+msgstr "השתמש ב-iframe"
+
+#: cardcom.php:822 cardcom.php:823
+msgid "invoice VAT free"
+msgstr "חשבונית ללא מע\"מ"
+
+#: cardcom.php:826
+msgid ""
+"For third option  \"Tax per product\" please see <a href=\"http://kb.cardcom."
+"co.il/article/AA-00359\">help</a>"
+msgstr ""
+
+#: cardcom.php:830 cardcom.php:831
+msgid "Order Status"
+msgstr "סטטוס העסקה"
+
+#: cardcom.php:834
+msgid "The order's status after a successful deal was made"
+msgstr "סטטוס העסקה לאחר חיוב מוצלח"
+
+#: cardcom.php:838
+msgid "failed Url"
+msgstr "דף כישלון (URL)"
+
+#: cardcom.php:840
+msgid "Optional: This page is displayed after deal failed"
+msgstr "אופציונלי: דף שיוצג לאחר שהעסקה נכשלה"
+
+#: cardcom.php:844
+msgid "success Url"
+msgstr "דך הצלחה (URL)"
+
+#: cardcom.php:846
+msgid "Optional: This page is displayed after deal succeeded"
+msgstr "אופציונלי: דף שיוצג לאחר שהעסקה הצליחה"
+
+#: cardcom.php:850 cardcom.php:851
+msgid "Invoice for Paypal"
+msgstr "חשבונית ל-Paypal"
+
+#: cardcom.php:853
+msgid "Activate invoice creation for Paypal"
+msgstr ""
+
+#: cardcom.php:858 cardcom.php:859
+msgid "Invoice for Paypal - Send to email"
+msgstr "חשבונית ל- Paypal - שלח לאימייל"
+
+#: cardcom.php:861
+msgid "Send Paypal Invoice to Email"
+msgstr "שלח חשבונית פאיפאל למייל"
+
+#: cardcom.php:1398
+msgid "Payment Successfully Completed ! Cardcom Deal Number:"
+msgstr "עסקה הושלמה בהצלחה! מספר עסקה:"
+
+#: cardcom.php:1419
+msgid "Attempt Payment Fail"
+msgstr "ניסיון התשלום נכשל"
+
+#: cardcom.php:1620
+msgid "Security Digits (CVV)"
+msgstr "3 ספרות בגב הכרטיס"
+
+#: cardcom.php:1634
+msgid "Credit Card Number"
+msgstr "מספר כרטיס אשראי"
+
+#: cardcom.php:1642
+msgid "Expiration date"
+msgstr "תוקף כרטיס"
+
+#: cardcom.php:1649
+msgid "Month"
+msgstr "חודש"
+
+#: cardcom.php:1658
+msgid "Year"
+msgstr "שנה"
+
+#: cardcom.php:1683
+msgid "Number of Payments"
+msgstr "מספר תשלומים"
+
+#: cardcom.php:1860
+msgid "Capture Charge - Deal captured to charge later"
+msgstr "עסקה מושהית \"Capture Charge\" - מסגרת תשלום נתפסה לחיוב מושהה"
+
+#: cardcom.php:1862
+msgid "Charge via Token (saved payment method)"
+msgstr "חויב ע\"י טוקן (Saved Payment Method)"
+
+#: cardcom.php:1863
+msgid "Charged Successfully! Cardcom Deal Number:"
+msgstr "עסקה חויבה בהצלחה! מספר עסקה:"
+
+#: cardcom.php:1871
+msgid "Failed billing attempt : "
+msgstr "ניסיון חיוב כושל : "
+
+#: cardcom.php:1878
+msgid "An Unexpected Error Occurred, please try again later"
+msgstr "אירעה שגיאה לא צפויה, אנא נסו במועד מאוחר יותר"
+
+#: cardcom.php:1879
+msgid "Error Code"
+msgstr "קוד שגיאה"
+
+#: cardcom.php:2201
+msgid "Could not find payment token for subscription "
+msgstr "לא ניתן למצוא טוקן תשלום למנוי "
+
+#: cardcom.php:2256
+msgid "Cardcom internal deal number "
+msgstr "מספר עסקה פנימי של קארדקום "
+
+#: cardcom.php:2262 cardcom.php:2267 cardcom.php:2274
+msgid "Scheduled payment for Renewal Order"
+msgstr "תשלום מתוזמן לעסקת חידוש"
+
+#: cardcom.php:2322
+msgid "Cardcom : Could not find subscription's order"
+msgstr "קארדקום : לא היה ניתן לאתר מנוי של הזמנה"
+
+#: cardcom.php:2329
+msgid "Cardcom : The subscription's order was not charge via cardcom"
+msgstr "קארדקום : המנוי של ההזמנה לא חויב בקארדקום"
+
+#: cardcom.php:2363
+msgid "Customer removed saved payment method for subscription "
+msgstr "לקוח הסיר תשלום שמור למנוי "
+
+#: cardcom.php:2366
+msgid "Customer removed saved payment method"
+msgstr "לקוח הסיר אמצעי תשלום שמור"
+
+#: cardcom.php:2436 cardcom.php:2450
+msgid "Scheduled payment for Subscription"
+msgstr "תשלום מזומן למנוי"
+
+#: cardcom.php:2438
+msgid "IPN payment completed OK! Deal Number: "
+msgstr ""
+
+#: cardcom.php:2452
+msgid "IPN payment completed NOT OK! Deal Number: "
+msgstr ""
+
+#: cardcom.php:2460
+msgid "An error occurred in subscription"
+msgstr "אירעה שגיאה במנוי"
+
+#: cardcom.php:2462
+msgid "An unexpected error occurred, please check logs: "
+msgstr "אירעה שגיאה לא צפויה, אנא בדוק לוגים "
+
+#: cardcom.php:2482
+msgid "could not get order's token to charge user."
+msgstr "לא ניתן היה לקבל טוקן של הזמנה כדי לחייב לקוח."
+
+#: cardcom.php:2513 cardcom.php:2520
+msgid "Renewal order - "
+msgstr "עסקת חידוש - "
+
+#: cardcom.php:2514 cardcom.php:2521
+msgid "Cardcom Deal Number - "
+msgstr "מספר העסקה בקארדקום - "
+
+#~ msgid ""
+#~ " - Capture Charge - (Requires Cardcom's Token module + J5 authorization "
+#~ "via acquirer)The payment page will \"Capture\" a sum to later charge.The "
+#~ "charging will occur only once the order's status is changes to processing/"
+#~ "completed."
+#~ msgstr ""
+#~ " - \"Capture Charge\" - בתצורת עבודה זו, דף התשלום תופס מסגרת בכרטיס "
+#~ "(דורש מודל אסימונים + J5)\"\n"
+#~ "החיוב יתבצע בפועל *רק* כאשר מקדמים את סטטוס ההזמנה לסטטוס\"\n"
+#~ "\"בטיפול\" או \"הושלם\" (לעובדים באנגלית : processing או completed)\""
+
+#~ msgid "Unknown Error"
+#~ msgstr "שגיאה"
+
+#~ msgid "Failed Charge : "
+#~ msgstr "כישלון חיוב : "
+
+#~ msgid "J2-Check Only, J5-Create a Deposite "
+#~ msgstr "J2 עסקת בדיקה, J5 עסקה מושהת "
