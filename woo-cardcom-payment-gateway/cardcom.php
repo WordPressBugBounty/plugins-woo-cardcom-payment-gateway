@@ -1,9 +1,9 @@
 <?php
 /*
 Plugin Name: CardCom Payment Gateway
-Plugin URI: http://kb.cardcom.co.il/article/AA-00359/0/
+Plugin URI: https://support.cardcom.solutions/hc/he/articles/360007128393-%D7%97%D7%99%D7%91%D7%95%D7%A8-%D7%94%D7%A1%D7%9C%D7%99%D7%A7%D7%94-%D7%9C%D7%97%D7%A0%D7%95%D7%AA-%D7%95%D7%95%D7%A8%D7%93%D7%A4%D7%A8%D7%A1-Wordpress-Woocommerce-Payment-WOO
 Description: CardCom Payment gateway for Woocommerce
-Version: 3.4.9.1
+Version: 3.5.0.0
 Changes: Coin
 Author: CardCom LTD
 Author URI: http://www.cardcom.co.il
@@ -54,10 +54,10 @@ function woocommerce_cardcom_init()
         static $InvVATFREE;
         static $IsActivateInvoiceForPaypal;
         static $SendToEmailInvoiceForPaypal;
-        static $plugin = "WOO-3.4.9.1";
+        static $plugin = "WOO-3.5.0.0";
         static $CardComURL = 'https://secure.cardcom.solutions'; // Production URL
 
-        function __construct()
+        function __construct( $args = [])
         {
             $this->id = 'cardcom';
             $this->method_title = __('CardCom', 'cardcom');
@@ -127,8 +127,10 @@ function woocommerce_cardcom_init()
             $this->UseIframe = $this->settings['UseIframe'];
             $this->OrderStatus = $this->settings['OrderStatus'];
             $this->InvoiceVATFREE = $this->settings['InvoiceVATFREE'];
-            $this->failedUrl = $this->settings['failedUrl'];
-            $this->successUrl = $this->settings['successUrl'];
+            // $this->failedUrl = $this->settings['failedUrl'];
+            // $this->successUrl = $this->settings['successUrl'];
+            $this->failedUrl = '';
+            $this->successUrl = '';
             self::$trm = $this->settings['terminalnumber'];
             self::$cvv_free_trm = $this->settings['cvvFreeTerminal'];
             self::$must_cvv = $this->settings['must_cvv'];
@@ -148,12 +150,19 @@ function woocommerce_cardcom_init()
             } else {
                 self::$SendToEmailInvoiceForPaypal = "1";
             }
+
+            
+            if( isset($args['block']) ) {
+                add_action('woocommerce_receipt_cardcom', array(&$this, 'receipt_page'));
+                return;
+            }
+
             add_action('woocommerce_api_wc_gateway_cardcom', array($this, 'check_ipn_response'));
             add_action('valid-cardcom-ipn-request', array(&$this, 'ipn_request'));
             add_action('valid-cardcom-successful-request', array(&$this, 'successful_request'));
             add_action('valid-cardcom-cancel-request', array(&$this, 'cancel_request'));
             add_action('valid-cardcom-failed-request', array(&$this, 'failed_request'));
-            add_action('woocommerce_receipt_cardcom', array(&$this, 'receipt_page'));
+            
 
             // Hooks
             add_action('woocommerce_update_options_payment_gateways_' . $this->id, array($this, 'process_admin_options'));
@@ -228,10 +237,24 @@ function woocommerce_cardcom_init()
             // add_action( 'paypal_ipn_for_wordpress_payment_status_completed', array( get_called_class(), 'CreateinvoiceForPayPal' ) );
             add_action('valid-paypal-standard-ipn-request', array(get_called_class(), 'ValidatePaypalRequest')); // For "PayPal Standard" gateway
             //  add_action( 'woocommerce_paypal_express_checkout_valid_ipn_request', array(get_called_class(), 'CreateinvoiceForPayPal' ) ); // For "Paypal Express Checkout"
-
+            add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), [ get_called_class(), 'plugin_action_links' ] );
             
 
         }
+
+        /**
+		 * Add plugin action links.
+		 *
+		 * @since 1.0.0
+		 * @version 4.0.0
+		 */
+		public static function plugin_action_links( $links ) {
+			$plugin_links = [
+				'<a href="admin.php?page=wc-settings&tab=checkout&section=cardcom">' . esc_html__( 'Settings', 'cardcom' ) . '</a>',
+			];
+			return array_merge( $plugin_links, $links );
+		}
+
 
         public function cardcom_on_order_status_refunded($order)
         {
@@ -239,8 +262,8 @@ function woocommerce_cardcom_init()
             $log_title = "cardcom_on_order_status_refunded method";
             self::cardcom_log($log_title, "================== START ==================");
             self::cardcom_log($log_title, "Order Id : " . $order->get_id());
-            $document_no = get_post_meta($order->get_id(),'initial_document_no',true);
-            $document_type = get_post_meta($order->get_id(),'initial_document_type',true);
+            $document_no = $order->get_meta('initial_document_no');
+            $document_type = $order->get_meta('initial_document_type');
 
             if( !empty($document_no) && !empty($document_type) ){
                 $bodyArray = [
@@ -275,6 +298,8 @@ function woocommerce_cardcom_init()
 
                     $order->add_order_note(__("Order was cancelled & Refund Invoice sent.", 'cardcom'));
                     $order->add_order_note(__("New cancelled invoice no :", 'cardcom') . $cancelledInfo->NewDocumentNumber);
+
+                    $order->update_status('refunded', 'Order cancelled & Refund Invoice sent.');
                     
                 }
                 else{
@@ -304,7 +329,7 @@ function woocommerce_cardcom_init()
             $log_title = "cardcom_on_order_status_cancelled method";
             self::cardcom_log($log_title, "================== START ==================");
             self::cardcom_log($log_title, "Order Id : " . $order->get_id());
-            $transaction_id = $order->get_meta('CardcomInternalDealNumber');
+            $transaction_id = $order->get_meta( 'CardcomInternalDealNumber' );
             
             if( !empty($transaction_id) ){
                 $bodyArray = [
@@ -332,13 +357,17 @@ function woocommerce_cardcom_init()
                 // To do : update document type and no from rest api response
                 if( isset( $cancelledInfo->NewTranzactionId ) && !empty( $cancelledInfo->NewTranzactionId ) ){
                     $order->set_transaction_id($cancelledInfo->NewTranzactionId);
-                    update_post_meta((int)$order->get_id(), 'CardcomInternalDealNumber', $cancelledInfo->NewTranzactionId);
+                    // update_post_meta((int)$order->get_id(), 'CardcomInternalDealNumber', $cancelledInfo->NewTranzactionId);
+                    $order->update_meta_data( 'CardcomInternalDealNumber', $cancelledInfo->NewTranzactionId );
+                    $order->save();
 
                 // Update order status
                     // $order->update_status("wc-cancelled", 'Cancelled', TRUE);
 
                     $order->add_order_note(__("Order was cancelled.", 'cardcom'));
                     $order->add_order_note(__("New transaction no :", 'cardcom') . $cancelledInfo->NewTranzactionId);
+
+                    $order->update_status('cancelled', 'Order cancelled.');
                     
                 }
                 else{
@@ -396,7 +425,9 @@ function woocommerce_cardcom_init()
                     $transaction_id = !empty($posted['txn_id']) ? wc_clean($posted['txn_id']) : '';
                     $order->payment_complete($transaction_id);
                     if (!empty($posted['mc_fee'])) {
-                        update_post_meta($order->get_id(), 'PayPal Transaction Fee', wc_clean($posted['mc_fee']));
+                        // update_post_meta($order->get_id(), 'PayPal Transaction Fee', wc_clean($posted['mc_fee']));
+                        $order->update_meta_data( 'PayPal Transaction Fee', wc_clean($posted['mc_fee']) );
+                        $order->save();
                         self::cardcom_log($title_log, "Logged PayPal transaction fee in Order.");
                     }
                     self::CreateinvoiceForPayPal($order->get_id());
@@ -460,14 +491,18 @@ function woocommerce_cardcom_init()
                 $initParams["Plugin"] = self::$plugin;
                 //$initParams["InvoiceType"] = "1";
 
-                $key_1_value = get_post_meta((int)$order_id, 'InvoiceNumber', true);
-                $key_2_value = get_post_meta((int)$order_id, 'InvoiceType', true);
+                $key_1_value = $order->get_meta('InvoiceNumber');
+                $key_2_value = $order->get_meta('InvoiceType');
                 if (!empty($key_1_value) && !empty($key_2_value)) {
                     error_log("Order has invoice: " . $key_1_value);
                     return;
                 }
-                update_post_meta((int)$order_id, 'InvoiceNumber', 0);
-                update_post_meta((int)$order_id, 'InvoiceType', 0);
+                // update_post_meta((int)$order_id, 'InvoiceNumber', 0);
+                $order->update_meta_data( 'InvoiceNumber', 0 );
+                $order->save();
+                // update_post_meta((int)$order_id, 'InvoiceType', 0);
+                $order->update_meta_data( 'InvoiceType', 0 );
+                $order->save();
                 $initParams["CustomPay.TransactionID"] = '32';
                 $initParams["CustomPay.TranDate"] = date('d/m/Y');
                 $initParams["CustomPay.Description"] = 'PayPal Payments';
@@ -491,8 +526,12 @@ function woocommerce_cardcom_init()
                         if (isset($responseArray['InvoiceNumber'])) {
                             $invNumber = $responseArray['InvoiceNumber'];
                             $invType = $responseArray['InvoiceType'];
-                            update_post_meta((int)$order_id, 'InvoiceNumber', $invNumber);
-                            update_post_meta((int)$order_id, 'InvoiceType', $invType);
+                            // update_post_meta((int)$order_id, 'InvoiceNumber', $invNumber);
+                            $order->update_meta_data( 'InvoiceNumber', $invNumber );
+                            $order->save();
+                            // update_post_meta((int)$order_id, 'InvoiceType', $invType);
+                            $order->update_meta_data( 'InvoiceType', $invType );
+                            $order->save();
                             self::cardcom_log($log_title, "Updated Invoice meta data in order");
                         } else {
                             self::cardcom_log($log_title, "InvoiceNumber is not set");
@@ -594,7 +633,7 @@ function woocommerce_cardcom_init()
                     if ($this->invoice == '1') {
                         $body = self::initInvoice($order->get_id(), self::$cvv_free_trm);
                     } else {
-                        $body = self::initTerminal($order, self::$cvv_free_trm);
+                        $body = self::initTerminal($order->get_id(), self::$cvv_free_trm);
                     }
                     $body['CustomeFields.Field24'] = 'Capture Updated Price';
                     $body['CustomeFields.Field25'] = "order_id:" . $order->get_id();
@@ -677,8 +716,12 @@ function woocommerce_cardcom_init()
             $order->save();
         }
 
-        public static function initTerminal($order, $OverTerminal = "")
+        public static function initTerminal($order_id, $OverTerminal = "")
         {
+            $order = wc_get_order($order_id);
+            if (!isset($order) || !$order) {
+                $order = new WC_Order($order_id);
+            }
             $params = array();
             $SumToBill = number_format($order->get_total(), 2, '.', '');
             $params["terminalnumber"] = self::$trm;
@@ -844,7 +887,7 @@ function woocommerce_cardcom_init()
             }
             // ============= Set Coupon discount details in invoice ============= //
             if ($order_discount > 0) {
-                $coupon_codes = $order->get_used_coupons();
+                $coupon_codes = $order->get_coupon_codes();
                 if (!empty($coupon_codes)) {
                     $params['InvoiceLines' . $AddToString . '.Description'] = __("Coupon code", "woocommerce") . ": " . implode(", ", $coupon_codes);
                 } else {
@@ -953,7 +996,7 @@ function woocommerce_cardcom_init()
                     'title' => __('PCI certification', 'cardcom'),
                     'label' => __('PCI certification', 'cardcom'),
                     'type' => 'select',
-                    'description' => __('Check this if your website is PCI compliant, and credit card numbers can be passed through your servers.<br />If you are not sure, keep this unchecked.', 'cardcom'),
+                    'description' => __("Check this if your website is PCI compliant, and credit card numbers can be passed through your servers.<br />If you are not sure, keep this unchecked.<br />This feature currently doesn't work with Checkout blocks. If you use it, keep this unchecked.", 'cardcom'),
                     'options' => array('1' => 'Yes', '2' => 'No'),
                     'default' => '2',
                 ),
@@ -1010,11 +1053,18 @@ function woocommerce_cardcom_init()
                     'description' => __('Limit the amount of payments', 'cardcom'),
                     'default' => '1'
                 ),
-                'currency' => array(
+                'currency_disabled' => array(
                     'title' => __('Currency', 'cardcom'),
                     'type' => 'text',
-                    'description' => __('Currency: 0- Auto Detect,  1 - NIS , 2 - USD , else ISO Currency', 'cardcom'),
-                    'default' => '1'
+                    'description' => __('Currency: 0 - Auto Detect,  1 - NIS , 2 - USD , else ISO Currency', 'cardcom'),
+                    'custom_attributes' => array(
+                        'disabled' => 'disabled',
+                        ),
+                ),
+                //The real value used for the displyed disabled currency field
+                'currency' => array(
+                    'type' => 'hidden',
+                    'default' => '0'
                 ),
                 'lang' => array(
                     'title' => __('Payment Gateway Language', 'cardcom'),
@@ -1049,10 +1099,10 @@ function woocommerce_cardcom_init()
                     'label' => __('Order Status', 'cardcom'),
                     'type' => 'select',
                     'options' => array('processing' => 'processing', 'completed' => 'completed', 'on-hold' => 'on-hold'),
-                    'description' => __("The order's status after a successful deal was made", 'cardcom'),
+                    'description' => __("The order's status after a successful deal was made (must be set to on-hold when the operation is set to Capture Charge)", 'cardcom'),
                     'default' => 'completed'
                 ),
-                'failedUrl' => array(
+         /*       'failedUrl' => array(
                     'title' => __('failed Url', 'cardcom'),
                     'type' => 'text',
                     'description' => __('Optional: This page is displayed after deal failed', 'cardcom'),
@@ -1063,7 +1113,7 @@ function woocommerce_cardcom_init()
                     'type' => 'text',
                     'description' => __('Optional: This page is displayed after deal succeeded', 'cardcom'),
                     'default' => ''
-                ),
+                ), */
                 'IsActivateInvoiceForPaypal' => array(
                     'title' => __('Invoice for Paypal', 'cardcom'),
                     'label' => __('Invoice for Paypal', 'cardcom'),
@@ -1237,12 +1287,14 @@ function woocommerce_cardcom_init()
                         'redirect' => add_query_arg('order', $order_id, add_query_arg('key', $order->get_order_key(), get_permalink(woocommerce_get_page_id('pay')))));
                 } else {
                     $arr_params = array('order-pay' => $order_id, 'operation' => $this->operationToPerform);
+                                   
                     return array(
                         'result' => 'success',
                         'redirect' => add_query_arg($arr_params, add_query_arg('key', $order->get_order_key(), $order->get_checkout_payment_url(true))));
                 }
 
             } else /* === Re-direct to LowProfile Page === */ {
+       
                 return array(
                     'result' => 'success',
                     'redirect' => $this->GetRedirectURL($order_id)
@@ -1262,6 +1314,7 @@ function woocommerce_cardcom_init()
         function pay_via_direct_api($order, $paymentTokenValue)
         {
             $order_id = $order->get_id();
+            
             if ($this->charge_token($paymentTokenValue, $order_id)) {
                 // ----  From this point the Order has completed the process successfully ----
                 // Remove Cart Manually (This is to prevent "הזמנה כפולה")
@@ -1273,9 +1326,16 @@ function woocommerce_cardcom_init()
                     'redirect' => $redirectTo);
             } else {
                 $redirectTo = self::string_is_set($this->failedUrl) ? $this->failedUrl : $this->get_return_url($order);
+                $message = '';
+                foreach( wc_get_notices('error') as $i => $error ){
+                    $message = $error['notice'];           
+                }
+            
                 return array(
                     'result' => 'fail',
-                    'redirect' => $redirectTo);
+                    'redirect' => $redirectTo,
+                    'message'  => $message 
+                );
             }
         }
 
@@ -1349,6 +1409,7 @@ function woocommerce_cardcom_init()
             wc_delete_order_item_meta((int)$order_id, 'InvoiceNumber');
             wc_delete_order_item_meta((int)$order_id, 'InvoiceType');
             $params = self::initInvoice($order_id);
+
             $params["APILevel"] = "9";
             $params["CardOwnerName"] = $firstName . " " . $lastName;
             $params["CardOwnerEmail"] = $email;
@@ -1425,7 +1486,9 @@ function woocommerce_cardcom_init()
             if ($exp[0] == "0") {
                 $IsOk = true;
                 $data['profile'] = $exp[1];
-                update_post_meta((int)$order_id, 'Profile', $data['profile']);
+                // update_post_meta((int)$order_id, 'Profile', $data['profile']);
+                $order->update_meta_data( 'Profile',  $data['profile']);
+                $order->save();
             } else {
                 $IsOk = false;
                 $this->HandleError($exp[0], $body, $urlencoded);
@@ -1496,7 +1559,7 @@ function woocommerce_cardcom_init()
         function generate_cardcom_form($order_id)
         {
             $URL = $this->GetRedirectURL($order_id);
-            $formstring = '<iframe width="100%" height="1000" frameborder="0" src="' . $URL . '" ></iframe>';
+            $formstring = '<iframe allow="payment" width="100%" height="1000" frameborder="0" src="' . $URL . '" ></iframe>';
             return $formstring;
         }
 
@@ -1614,21 +1677,36 @@ function woocommerce_cardcom_init()
 
                 if (!empty($orderid)) {
 
-                    update_post_meta((int)$orderid, 'CardcomInternalDealNumber', $this->InternalDealNumberPro);
-                    update_post_meta((int)$orderid, 'initial_document_no', $this->DocumentNumber);
-                    update_post_meta((int)$orderid, 'initial_document_type', $this->DocumentType);
+                    // update_post_meta((int)$orderid, 'CardcomInternalDealNumber', $this->InternalDealNumberPro);
+                    $order->update_meta_data( 'CardcomInternalDealNumber', $this->InternalDealNumberPro );
+                    $order->save();
+                    
 
-                    $order->add_order_note(__('Payment Successfully Completed ! Cardcom Deal Number:' . $this->InternalDealNumberPro, 'cardcom'));
+                    // update_post_meta((int)$orderid, 'initial_document_no', $this->DocumentNumber);
+                    $order->update_meta_data( 'initial_document_no', $this->DocumentNumber );
+                    $order->save();
+                    
+                    // update_post_meta((int)$orderid, 'initial_document_type', $this->DocumentType);
+                    $order->update_meta_data( 'initial_document_type', $this->DocumentType );
+                    $order->save();
+
                     $isSetToCaptureCharge = $order->get_meta('_set_Capture_Charge');
                     if (isset($isSetToCaptureCharge) && $isSetToCaptureCharge == '1') {
                         $order->delete_meta_data('_set_Capture_Charge');
-                    } else {
-                        $order->payment_complete();
-                        if ($this->OrderStatus != 'on-hold') {
+						$order->add_order_note(__('A capture charge deal is set. Cardcom Deal Number:' . $this->InternalDealNumberPro, 'cardcom'));
+						 $order->save();
+					}
+					else {
+                       // $order->payment_complete();
+                        if ($this->OrderStatus == 'processing' || $this->OrderStatus == 'completed') {
                             $order->payment_complete();
+							$order->add_order_note(__('Payment Successfully Completed! Cardcom Deal Number:' . $this->InternalDealNumberPro, 'cardcom'));
+							 $order->save();
                         }
                     }
-                    update_post_meta((int)$orderid, 'IsIpnRecieved', 'true');
+                    //update_post_meta((int)$orderid, 'IsIpnRecieved', 'true');
+                    $order->update_meta_data( 'IsIpnRecieved', 'true' );
+                    $order->save();
                     return true;
                 }
             } else {
@@ -1755,43 +1833,79 @@ function woocommerce_cardcom_init()
                     $LPD_Operation = $responseArray['Operation'];
                     self::cardcom_log($log_title, "Response Operation is " . $LPD_Operation);
                     if ($LPD_Operation === '2' || $LPD_Operation === '3') {
-                        $token = $this->create_cardcom_token($responseArray);
+                        $token = $this->create_cardcom_token($responseArray, $order_id);
                         self::cardcom_log($log_title, "Order's Token " . $token->get_id());
                         $this->save_token_in_order($token, $order);
                         $this->save_token_in_order_v2($token, $order);
                         if ($isCreateToken) {
-                            $user_token = $this->create_cardcom_token($responseArray);
+                            $user_token = $this->create_cardcom_token($responseArray, $order_id);
                             self::cardcom_log($log_title, "User's Token " . $user_token->get_id());
                             $this->save_token_for_user($user_token, $order);
                         }
                         if ($LPD_Operation == '3') {
-                            add_post_meta($order_id, 'CardcomTokenExDate', $responseArray['TokenExDate']);
+                            // add_post_meta($order_id, 'CardcomTokenExDate', $responseArray['TokenExDate']);
+                            $order->update_meta_data( 'CardcomTokenExDate', $responseArray['TokenExDate'] );
+                            $order->save();
                         }
                     }
                 } catch (Exception $ex) {
                     error_log($ex->getMessage());
                 }
                 // http://kb.cardcom.co.il/article/AA-00241/0
-                add_post_meta($order_id, 'Payment Gateway', 'CardCom');
-                add_post_meta($order_id, 'initial_document_type', $responseArray['InvoiceType']);
-                add_post_meta($order_id, 'initial_document_no', $responseArray['InvoiceNumber']);
-                add_post_meta($order_id, 'cc_number', $responseArray['ExtShvaParams_CardNumber5']);
-                add_post_meta($order_id, 'cc_holdername', $responseArray['ExtShvaParams_CardOwnerName']);
-                add_post_meta($order_id, 'cc_numofpayments', 1 + $responseArray['ExtShvaParams_NumberOfPayments94']);
-                if (1 + $responseArray['ExtShvaParams_NumberOfPayments94'] == 1) {
-                    add_post_meta($order_id, 'cc_firstpayment', $responseArray['ExtShvaParams_Sum36']);
-                    add_post_meta($order_id, 'cc_paymenttype', '1');
-                } else {
-                    add_post_meta($order_id, 'cc_firstpayment', $responseArray['ExtShvaParams_FirstPaymentSum78']);
-                    add_post_meta($order_id, 'cc_paymenttype', '2');
-                }
-                add_post_meta($order_id, 'cc_total', $responseArray['ExtShvaParams_Sum36']);
-                add_post_meta($order_id, 'cc_cardtype', $responseArray['ExtShvaParams_Sulac25']);
-                add_post_meta($order_id, 'cc_Sulac', $responseArray['ExtShvaParams_Sulac25']);
-                add_post_meta($order_id, 'cc_Mutag', $responseArray['ExtShvaParams_Mutag24']);
-                add_post_meta($order_id, 'cc_Tokef', $responseArray['ExtShvaParams_Tokef30']);
 
-                update_post_meta((int)$order_id, 'Profile', $lpc);
+                // add_post_meta($order_id, 'Payment Gateway', 'CardCom');
+                $order->update_meta_data( 'Payment Gateway', 'CardCom' );
+                $order->save();
+                // add_post_meta($order_id, 'initial_document_type', $responseArray['InvoiceType']);
+                $order->update_meta_data( 'initial_document_type', $responseArray['InvoiceType'] );
+                $order->save();
+                // add_post_meta($order_id, 'initial_document_no', $responseArray['InvoiceNumber']);
+                $order->update_meta_data( 'initial_document_no', $responseArray['InvoiceNumber'] );
+                $order->save();
+                // add_post_meta($order_id, 'cc_number', $responseArray['ExtShvaParams_CardNumber5']);
+                $order->update_meta_data( 'cc_number', $responseArray['ExtShvaParams_CardNumber5'] );
+                $order->save();
+                // add_post_meta($order_id, 'cc_holdername', $responseArray['ExtShvaParams_CardOwnerName']);
+                $order->update_meta_data( 'cc_holdername', $responseArray['ExtShvaParams_CardOwnerName'] );
+                $order->save();
+                // add_post_meta($order_id, 'cc_numofpayments', 1 + $responseArray['ExtShvaParams_NumberOfPayments94']);
+                $order->update_meta_data( 'cc_numofpayments', (1 + $responseArray['ExtShvaParams_NumberOfPayments94']) );
+                $order->save();
+
+                if (1 + $responseArray['ExtShvaParams_NumberOfPayments94'] == 1) {
+                    // add_post_meta($order_id, 'cc_firstpayment', $responseArray['ExtShvaParams_Sum36']);
+                    $order->update_meta_data( 'cc_firstpayment', $responseArray['ExtShvaParams_Sum36'] );
+                    $order->save();
+                    // add_post_meta($order_id, 'cc_paymenttype', '1');
+                    $order->update_meta_data( 'cc_paymenttype', '1' );
+                    $order->save();
+                } else {
+                    // add_post_meta($order_id, 'cc_firstpayment', $responseArray['ExtShvaParams_FirstPaymentSum78']);
+                    $order->update_meta_data( 'cc_firstpayment', $responseArray['ExtShvaParams_FirstPaymentSum78'] );
+                    $order->save();
+                    // add_post_meta($order_id, 'cc_paymenttype', '2');
+                    $order->update_meta_data( 'cc_paymenttype', '2' );
+                    $order->save();
+                }
+                // add_post_meta($order_id, 'cc_total', $responseArray['ExtShvaParams_Sum36']);
+                $order->update_meta_data( 'cc_total', $responseArray['ExtShvaParams_Sum36'] );
+                $order->save();
+                // add_post_meta($order_id, 'cc_cardtype', $responseArray['ExtShvaParams_Sulac25']);
+                $order->update_meta_data( 'cc_cardtype', $responseArray['ExtShvaParams_Sulac25'] );
+                $order->save();
+                // add_post_meta($order_id, 'cc_Sulac', $responseArray['ExtShvaParams_Sulac25']);
+                $order->update_meta_data( 'cc_Sulac', $responseArray['ExtShvaParams_Sulac25'] );
+                $order->save();
+                // add_post_meta($order_id, 'cc_Mutag', $responseArray['ExtShvaParams_Mutag24']);
+                $order->update_meta_data( 'cc_Mutag', $responseArray['ExtShvaParams_Mutag24'] );
+                $order->save();
+                // add_post_meta($order_id, 'cc_Tokef', $responseArray['ExtShvaParams_Tokef30']);
+                $order->update_meta_data( 'cc_Tokef', $responseArray['ExtShvaParams_Tokef30'] );
+                $order->save();
+
+                // update_post_meta((int)$order_id, 'Profile', $lpc);
+                $order->update_meta_data( 'Profile', $lpc );
+                $order->save();
 
             }
             if ($isSetToCaptureCharge) {
@@ -1813,8 +1927,11 @@ function woocommerce_cardcom_init()
                 $order->add_meta_data('cardcom_CardOwnerEmail', $responseArray["CardOwnerEmail"]);
                 $order->add_meta_data('cardcom_CardOwnerID', $responseArray["CardOwnerID"]);
                 $order->save_meta_data();
-                if($returnvalue == '0')
+                if($returnvalue == '0'){
                     $order->update_status("on-hold", "On hold for capture charge-2");
+					$order->save();
+				}
+				
             }
             do_action('cardcom_IsLowProfileCodeDealOneOK', $returnvalue, $responseArray, $order_id);
             return $returnvalue;
@@ -1836,6 +1953,7 @@ function woocommerce_cardcom_init()
                 $RenderCVV = true;
             }
             // ------- PCI fields Render Credit Card fields for the user to input ------- //
+            self::cardcom_log('shanicc', $RenderCVV);
             if ($this->cerPCI == '1' && ($this->does_operation_compatible_with_PCI_fields())) {
                 $this->cardcom_CreditCard_fields();
                 $RenderCVV = true;
@@ -1955,7 +2073,15 @@ function woocommerce_cardcom_init()
                 $order->delete_meta_data("save_token_on_user");
             }
             $params = array();
-            $params = self::initInvoice($order_id, self::$cvv_free_trm);
+            
+            if ($this->invoice == '1') {
+                self::cardcom_log($log_title, "initInvoice method used");
+                $params = self::initInvoice($order_id, self::$cvv_free_trm);
+            } else {
+                self::cardcom_log($log_title, "initTerminal method used");
+                $params = self::initTerminal($order_id, self::$cvv_free_trm);
+            }
+            
             $params['TokenToCharge.APILevel'] = '10';
             $coin = self::GetCurrency($order, self::$CoinID);
             $cvv = $this->get_post("cardcom-card-cvc");
@@ -1976,6 +2102,7 @@ function woocommerce_cardcom_init()
                     $params['TokenToCharge.JParameter'] = "2";
                     $params['CustomeFields.Field24'] = "Save Token Only";
                 }
+                
             }
             // ============= If user selected saved payment (i.e. Token)  ============= //
             if ($paymentTokenValue !== null && $paymentTokenValue !== 'new') {
@@ -2029,10 +2156,25 @@ function woocommerce_cardcom_init()
             // =================== Get Response and handle =================== //
             // =============================================================== //
             $response = $this->cardcom_post(self::$CardComURL . '/interface/ChargeToken.aspx', $args);
+            
             $body = wp_remote_retrieve_body($response);
             $responseArray = array();
             parse_str($body, $responseArray);
+            $WC_Logger = new WC_Logger();
+            $WC_Logger->add( 'cardcom-log-2024', print_r($responseArray,true) );
             $this->InternalDealNumberPro = 0;
+            
+            if( isset( $responseArray['InvoiceResponse_InvoiceNumber'] ) ){
+                $order->update_meta_data('initial_document_no', $responseArray['InvoiceResponse_InvoiceNumber'] );
+                $order->add_order_note(__("document_no :", 'cardcom') . $responseArray['InvoiceResponse_InvoiceNumber']);
+            }
+
+                            
+            if( isset( $responseArray['InvoiceResponse_InvoiceType'] ) ){
+                    $order->update_meta_data('initial_document_type', $responseArray['InvoiceResponse_InvoiceType'] );
+                    $order->add_order_note(__("document_type :", 'cardcom') . $responseArray['InvoiceResponse_InvoiceType']);
+            }
+
             $respCode = isset($responseArray['ResponseCode']) ? $responseArray['ResponseCode'] : null;
             $respDesc = isset($responseArray['Description']) ? $responseArray['Description'] : null;
             // ================================== //
@@ -2046,20 +2188,54 @@ function woocommerce_cardcom_init()
                 } else {
                     $this->InternalDealNumberPro = "9";
                 }
-                add_post_meta($order_id, 'Payment Gateway', 'CardCom');
-                update_post_meta((int)$order_id, 'CardcomInternalDealNumber', $this->InternalDealNumberPro);
+                // add_post_meta($order_id, 'Payment Gateway', 'CardCom');
+                $order->update_meta_data( 'Payment Gateway', 'CardCom' );
+                $order->save();
+                // update_post_meta((int)$order_id, 'CardcomInternalDealNumber', $this->InternalDealNumberPro);
+                
+                $order->update_meta_data( 'CardcomInternalDealNumber', $this->InternalDealNumberPro );
+                $order->save();
+
                 $ccNumber = "";
                 if (isset($responseArray['CardNumStart'])) $ccNumber .= $responseArray['CardNumStart'];
                 $ccNumber .= "*****";
                 if (isset($responseArray['CardNumEnd'])) $ccNumber .= $responseArray['CardNumEnd'];
-                add_post_meta($order_id, 'cc_number', $ccNumber);
-                add_post_meta($order_id, 'cc_holdername', $params["TokenToCharge.CardOwnerName"]);
-                add_post_meta($order_id, 'cc_numofpayments', $params['TokenToCharge.NumOfPayments']);
-                add_post_meta($order_id, 'cc_total', $params['TokenToCharge.SumToBill']);
-                if (isset($responseArray['Sulac25'])) add_post_meta($order_id, 'cc_cardtype', $responseArray['Sulac25']);
-                if (isset($responseArray['Sulac_25'])) add_post_meta($order_id, 'cc_Sulac', $responseArray['Sulac_25']);
-                if (isset($responseArray['Mutag_24'])) add_post_meta($order_id, 'cc_Mutag', $responseArray['Mutag_24']);
-                if (isset($responseArray['Tokef_30'])) add_post_meta($order_id, 'cc_Tokef', $responseArray['Tokef_30']);
+                // add_post_meta($order_id, 'cc_number', $ccNumber);
+                $order->update_meta_data( 'cc_number', $ccNumber );
+                $order->save();
+                // add_post_meta($order_id, 'cc_holdername', $params["TokenToCharge.CardOwnerName"]);
+                $order->update_meta_data( 'cc_holdername', $params["TokenToCharge.CardOwnerName"] );
+                $order->save();
+                // add_post_meta($order_id, 'cc_numofpayments', $params['TokenToCharge.NumOfPayments']);
+                $order->update_meta_data( 'cc_numofpayments', $params['TokenToCharge.NumOfPayments'] );
+                $order->save();
+                // add_post_meta($order_id, 'cc_total', $params['TokenToCharge.SumToBill']);
+                $order->update_meta_data( 'cc_total', $params['TokenToCharge.SumToBill'] );
+                $order->save();
+                
+                if (isset($responseArray['Sulac25'])) {
+                    // add_post_meta($order_id, 'cc_cardtype', $responseArray['Sulac25']);
+                    $order->update_meta_data( 'cc_cardtype', $responseArray['Sulac25'] );
+                    $order->save();
+                }
+                
+                if (isset($responseArray['Sulac_25'])) {
+                    // add_post_meta($order_id, 'cc_Sulac', $responseArray['Sulac_25']);
+                    $order->update_meta_data( 'cc_Sulac',$responseArray['Sulac_25'] );
+                    $order->save();
+                }
+                
+                if (isset($responseArray['Mutag_24'])){ 
+                    // add_post_meta($order_id, 'cc_Mutag', $responseArray['Mutag_24']);
+                    $order->update_meta_data( 'cc_Mutag', $responseArray['Mutag_24']  );
+                    $order->save();
+                }
+                
+                if (isset($responseArray['Tokef_30'])){ 
+                    // add_post_meta($order_id, 'cc_Tokef', $responseArray['Tokef_30']);
+                    $order->update_meta_data( 'cc_Tokef', $responseArray['Tokef_30'] );
+                    $order->save();
+                }
                 // ==================== Save old Token on order ==================== //
                 if ($paymentTokenValue !== null && $paymentTokenValue !== "new") {
                     self::cardcom_log($log_title, "Save old Token on order");
@@ -2074,12 +2250,12 @@ function woocommerce_cardcom_init()
                     $responseArray['ExtShvaParams_Mutag24'] = $responseArray["Mutag_24"];
                     $responseArray['ExtShvaParams_CardNumber5'] = $responseArray["CardNumEnd"];
                     $responseArray['Token'] = $responseArray["Token"];
-                    $token = $this->create_cardcom_token($responseArray);
+                    $token = $this->create_cardcom_token($responseArray, $order_id);
                     self::cardcom_log($log_title, "Order's Token " . $token->get_id());
                     $this->save_token_in_order($token, $order);
                     $this->save_token_in_order_v2($token, $order);
                     if ($save_token_for_user_bool) {
-                        $user_token = $this->create_cardcom_token($responseArray);
+                        $user_token = $this->create_cardcom_token($responseArray, $order_id);
                         self::cardcom_log($log_title, "User's Token " . $user_token->get_id());
                         $this->save_token_for_user($user_token, $order);
                     }
@@ -2189,7 +2365,7 @@ function woocommerce_cardcom_init()
          * Data Required: "ExtShvaParams_Tokef30", "ExtShvaParams_Mutag24", "Token", "ExtShvaParams_CardNumber5"
          * @return WC_Payment_Token_CC|null
          */
-        function create_cardcom_token($responseArray)
+        function create_cardcom_token($responseArray, $order_id = null)
         {
             $log_title = "create_cardcom_token";
             self::cardcom_log($log_title, "Initiated");
@@ -2216,6 +2392,13 @@ function woocommerce_cardcom_init()
                     $token = new WC_Payment_Token_CC();
                     $token->set_gateway_id($this->id);
                     $token->set_token($responseArray['Token']);
+					if( $order_id){
+						$order =  wc_get_order($order_id);
+						$user_id = $order->get_user_id();
+						self::cardcom_log($log_title, $user_id);
+						$token->set_user_id($user_id);
+					}
+					
                     $token->set_last4($responseArray['ExtShvaParams_CardNumber5']);
                     $token->set_expiry_year($ExYear);
                     $token->set_expiry_month($ExMonth);
@@ -2315,10 +2498,18 @@ function woocommerce_cardcom_init()
             self::cardcom_log($log_title, "Order Id " . $order->get_id());
             $order_id = $order->get_id();
             if ($token->get_id() > 0) {
-                add_post_meta($order_id, 'CardcomToken', $token->get_token(), true);
-                add_post_meta($order_id, 'CardcomTokenId', $token->get_id(), true);
-                add_post_meta($order_id, 'CardcomToken_expiry_year', $token->get_expiry_year(), true);
-                add_post_meta($order_id, 'CardcomToken_expiry_month', $token->get_expiry_month(), true);
+                // add_post_meta($order_id, 'CardcomToken', $token->get_token(), true);
+                $order->update_meta_data( 'CardcomToken', $token->get_token() );
+                $order->save();
+                // add_post_meta($order_id, 'CardcomTokenId', $token->get_id(), true);
+                $order->update_meta_data( 'CardcomTokenId', $token->get_id() );
+                $order->save();
+                // add_post_meta($order_id, 'CardcomToken_expiry_year', $token->get_expiry_year(), true);
+                $order->update_meta_data( 'CardcomToken_expiry_year', $token->get_expiry_year() );
+                $order->save();
+                // add_post_meta($order_id, 'CardcomToken_expiry_month', $token->get_expiry_month(), true);
+                $order->update_meta_data( 'CardcomToken_expiry_month', $token->get_expiry_month() );
+                $order->save();
                 self::cardcom_log($log_title, "Saved token in Order : " . $order_id);
             } else {
                 self::cardcom_log($log_title, "Could not save toke in Order : " . $order_id . " With Token Id " . $token->get_id());
@@ -2462,7 +2653,7 @@ function woocommerce_cardcom_init()
                     $request = self::initInvoice($renewal_order_id, self::$cvv_free_trm);
                 } else {
                     self::cardcom_log($log_title, "initTerminal method used");
-                    $request = self::initTerminal($renewal_order, self::$cvv_free_trm);
+                    $request = self::initTerminal($renewal_order_id, self::$cvv_free_trm);
                 }
                 $UniqAsmachta = "renewal_order" . $renewal_order_id . $this->GetCurrentURL();
                 if (strlen($UniqAsmachta) > 50) {
@@ -2626,7 +2817,7 @@ function woocommerce_cardcom_init()
                     $request = self::initInvoice($subscription->get_id(), self::$cvv_free_trm);
                 } else {
                     self::cardcom_log($logTitle, "initTerminal method used");
-                    $request = self::initTerminal($subscription, self::$cvv_free_trm);
+                    $request = self::initTerminal($subscription->get_id(), self::$cvv_free_trm);
                 }
                 // =========================== Set Unique Asmachta =========================== //
                 $recurring_payments_count_metadata_key = 'reccuring_payments_count';
@@ -2740,6 +2931,9 @@ function woocommerce_cardcom_init()
                 // This CASE happened to a merchant which had new Plugins from WooFunnels (WooFunnel's builder).
                 // He tried to test the WooFunne's Upsell feature and got an error in this section, see Bug 929 in BillGold
                 self::cardcom_log($log_title, "Could not find any token in the order, so no token will be saved in subscription item");
+				
+				//A fix for the issue that PayPal invoices are not being created for subscription orders because no token is saved in the order
+				self::CreateinvoiceForPayPal($order->get_id());
             }
         }
 
@@ -2768,6 +2962,9 @@ function woocommerce_cardcom_init()
                         __("Renewal order - ", 'cardcom') . $last_order->get_id() .
                         __("Cardcom Deal Number - ", 'cardcom') . $cardcom_internal_deal_number);
                     $order->save();
+					
+					//A fix for the issue that PayPal invoices are not being created for subscription renewal orders because no token is saved in the order
+					self::CreateinvoiceForPayPal($order->get_id());
                 }
             }
         }
@@ -3005,6 +3202,8 @@ function woocommerce_cardcom_init()
         }
         //endregion
     }
+    // Include the block class
+    require_once __DIR__ . '/blocks/class-wc-cardcom-payment-block.php';
 
     /**
      * Add the Gateway to WooCommerce
@@ -3016,5 +3215,21 @@ function woocommerce_cardcom_init()
     }
 
     add_filter('woocommerce_payment_gateways', 'add_cardcom_gateway');
+
+    
+    add_action( 'woocommerce_blocks_loaded', 'woocommerce_gateway_cardcom_woocommerce_block_support');
+
+    function woocommerce_gateway_cardcom_woocommerce_block_support() {
+	
+		if ( class_exists( 'Automattic\WooCommerce\Blocks\Payments\Integrations\AbstractPaymentMethodType' ) ) {
+			// require_once 'includes/blocks/class-wc-dummy-payments-blocks.php';
+			add_action(
+				'woocommerce_blocks_payment_method_type_registration',
+				function( Automattic\WooCommerce\Blocks\Payments\PaymentMethodRegistry $payment_method_registry ) {
+					$payment_method_registry->register( new WC_Gateway_Cardcom_Blocks_Support() );
+				}
+			);
+		}
+	}
     WC_Gateway_Cardcom::init(); // add listner to paypal payments
 }

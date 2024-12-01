@@ -1,11 +1,11 @@
-										=== CardCom Payment Gateway ===
+=== CardCom Payment Gateway ===
 Contributors: Cardcom LTD
 Donate link:
 Tags: woocommerce, payment-gateway, checkout
 Requires at least: 3.3
 Requires PHP: 7.2
-Tested up to: 7.4
-Stable tag: 3.4.9.1
+Tested up to: 6.7.1
+Stable tag: 3.5.0.0
 License: GPLv2 or later
 License URI: https://secure.cardcom.co.il/Html/agreement/agreement.htm
 
@@ -22,6 +22,7 @@ Allows your website to receive payments from your customers, via the WooCommerce
 
 This plugin supports various configurations & setups:
 
+* WooCommerce Blocks
 * Making credit-card deals & saving as "Payment Method" for returning customers.
 * Making Credit-line "delayed" payments (aka "Capture charge")
 * PayPal integration
