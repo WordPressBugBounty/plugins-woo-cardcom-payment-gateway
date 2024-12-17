@@ -3,7 +3,7 @@
 Plugin Name: CardCom Payment Gateway
 Plugin URI: https://support.cardcom.solutions/hc/he/articles/360007128393-%D7%97%D7%99%D7%91%D7%95%D7%A8-%D7%94%D7%A1%D7%9C%D7%99%D7%A7%D7%94-%D7%9C%D7%97%D7%A0%D7%95%D7%AA-%D7%95%D7%95%D7%A8%D7%93%D7%A4%D7%A8%D7%A1-Wordpress-Woocommerce-Payment-WOO
 Description: CardCom Payment gateway for Woocommerce
-Version: 3.5.0.0
+Version: 3.5.0.1
 Changes: Coin
 Author: CardCom LTD
 Author URI: http://www.cardcom.co.il
@@ -54,7 +54,7 @@ function woocommerce_cardcom_init()
         static $InvVATFREE;
         static $IsActivateInvoiceForPaypal;
         static $SendToEmailInvoiceForPaypal;
-        static $plugin = "WOO-3.5.0.0";
+        static $plugin = "WOO-3.5.0.1";
         static $CardComURL = 'https://secure.cardcom.solutions'; // Production URL
 
         function __construct( $args = [])
@@ -1698,7 +1698,7 @@ function woocommerce_cardcom_init()
 					}
 					else {
                        // $order->payment_complete();
-                        if ($this->OrderStatus == 'processing' || $this->OrderStatus == 'completed') {
+                        if ($this->OrderStatus == 'processing' || $this->OrderStatus == 'completed' || $this->OrderStatus == 'on-hold') {
                             $order->payment_complete();
 							$order->add_order_note(__('Payment Successfully Completed! Cardcom Deal Number:' . $this->InternalDealNumberPro, 'cardcom'));
 							 $order->save();
