@@ -5,7 +5,7 @@ Tags: woocommerce, payment-gateway, checkout
 Requires at least: 3.3
 Requires PHP: 7.2
 Tested up to: 6.7.1
-Stable tag: 3.5.0.1
+Stable tag: 3.5.0.2
 License: GPLv2 or later
 License URI: https://secure.cardcom.co.il/Html/agreement/agreement.htm
 
