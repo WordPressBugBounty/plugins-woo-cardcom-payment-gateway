@@ -3,8 +3,8 @@
 Plugin Name: CardCom Payment Gateway
 Plugin URI: https://support.cardcom.solutions/hc/he/articles/360007128393-%D7%97%D7%99%D7%91%D7%95%D7%A8-%D7%94%D7%A1%D7%9C%D7%99%D7%A7%D7%94-%D7%9C%D7%97%D7%A0%D7%95%D7%AA-%D7%95%D7%95%D7%A8%D7%93%D7%A4%D7%A8%D7%A1-Wordpress-Woocommerce-Payment-WOO
 Description: CardCom Payment gateway for Woocommerce
-Version: 3.5.0.2
-Changes: Coin
+Version: 3.5.0.3
+Changes: Added Debug Logging feature flag and admin message on network failure
 Author: CardCom LTD
 Author URI: http://www.cardcom.co.il
 */
@@ -54,7 +54,8 @@ function woocommerce_cardcom_init()
         static $InvVATFREE;
         static $IsActivateInvoiceForPaypal;
         static $SendToEmailInvoiceForPaypal;
-        static $plugin = "WOO-3.5.0.2";
+        static $debug_logging;
+        static $plugin = "WOO-3.5.0.3";
         static $CardComURL = 'https://secure.cardcom.solutions'; // Production URL
 
         //declaring properties because dynamic properties are no longer supported in PHP 8.2
@@ -131,7 +132,8 @@ function woocommerce_cardcom_init()
             $this->operation = $this->settings['operation'];
             $op = $this->operation;
             if ($op !== '1' && $op !== '2' && $op !== '3' && $op !== '4' && $op !== '5' && $op !== '6') {
-                self::cardcom_log("Warning", "Operation value not recognized, setting to default (Charge only)");
+                // Always log configuration warnings
+                error_log("Cardcom ::: Warning ::: Operation value not recognized, setting to default (Charge only)");
                 $this->operation = '1';
             }
             $this->operationToPerform = $this->operation;
@@ -162,6 +164,11 @@ function woocommerce_cardcom_init()
                 self::$SendToEmailInvoiceForPaypal = $this->settings['SendToEmailInvoiceForPaypal'];
             } else {
                 self::$SendToEmailInvoiceForPaypal = "1";
+            }
+            if (isset($this->settings['debug_logging'])) {
+                self::$debug_logging = $this->settings['debug_logging'];
+            } else {
+                self::$debug_logging = '0';
             }
 
             
@@ -1091,6 +1098,14 @@ function woocommerce_cardcom_init()
                     'description' => __('Admin Email', 'cardcom'),
                     'default' => ''
                 ),
+                'debug_logging' => array(
+                    'title' => __('Debug Logging', 'cardcom'),
+                    'label' => __('Enable Debug Logging', 'cardcom'),
+                    'type' => 'select',
+                    'options' => array('0' => 'No', '1' => 'Yes'),
+                    'description' => __('Enable detailed logging for debugging purposes. Warning: This generates many log entries per transaction. Only enable when troubleshooting issues.', 'cardcom'),
+                    'default' => '0'
+                ),
                 'UseIframe' => array(
                     'title' => __('Use Iframe', 'cardcom'),
                     'label' => __('Use Iframe', 'cardcom'),
@@ -1534,7 +1549,8 @@ function woocommerce_cardcom_init()
                     }
                     // ======= Fails (Write error message ONCE if after the other 3 tries ALSO failed) ======= //
                     if (counter == 0) {
-                        self::cardcom_log("post failed", "Url : " . $url);
+                        // Always log critical API connection failures
+                        error_log("Cardcom ::: post failed ::: Url : " . $url);
                         $error = $response->get_error_message();
                         $this->HandleError('999', $error, $args);
                     }
@@ -1558,7 +1574,8 @@ function woocommerce_cardcom_init()
 
                 );
             }
-            self::cardcom_log("Handle Error",
+            // Always log critical errors regardless of debug setting
+            error_log("Cardcom ::: Handle Error ::: " .
                 "Wordpress Transcation Faild!\n
                 ==== XML Response ====\n
                 Terminal Number:" . $this->terminalnumber . "\n
@@ -1581,7 +1598,8 @@ function woocommerce_cardcom_init()
             $this->operationToPerform = $_GET['operation'];
             if ($this->operationToPerform != '2' && $this->operationToPerform != '3' && $this->operationToPerform != '4' && $this->operationToPerform != '5') {
                 $this->operationToPerform = '1';
-                self::cardcom_log("receipt page method", "operationToPerform was not set, setting it to default");
+                // Always log configuration warnings
+                error_log("Cardcom ::: receipt page method ::: operationToPerform was not set, setting it to default");
             }
             echo $this->generate_cardcom_form($order);
         }
@@ -1803,8 +1821,37 @@ function woocommerce_cardcom_init()
                 'headers' => array(),
                 'cookies' => array());
             $response = $this->cardcom_post(self::$CardComURL . '/Interface/BillGoldGetLowProfileIndicator.aspx', $args);
-            if (is_wp_error($response)) {
-
+            if (is_wp_error( $response)) {
+                $error_message = $response->get_error_message();
+                error_log( 'Cardcom API error: ' . $error_message );
+            
+                // Send an email to the admin if configured
+                if ( !empty( $this->adminEmail ) ) {
+                    wp_mail(
+                        $this->adminEmail,
+                        __('CardCom Payment Gateway Error: API Unreachable', 'cardcom'),
+                        sprintf(
+                            __("An error occurred while trying to connect to the CardCom API endpoint '/Interface/BillGoldGetLowProfileIndicator.aspx'.\n\nError: %s\n\nOrder ID: %s\n\nPlease check the connection and contact CardCom support if the issue persists.", 'cardcom'),
+                            $error_message,
+                            $order->get_id()
+                        )
+                    );
+                }
+            
+                // Get user's preferred language for error message
+                $user_message = '';
+                $user_title = '';
+                
+                if ($this->lang === 'he') {
+                    $user_message = 'אנו מתנצלים, אך קיימת בעיה זמנית בעיבוד התשלום. יש לנסות שוב בעוד כמה דקות או ליצור קשר עם החנות לקבלת סיוע.';
+                    $user_title = 'שגיאה בעיבוד תשלום';
+                } else {
+                    $user_message = __('We\'re sorry, but there\'s a temporary issue processing your payment. Please try again in a few minutes or contact the store for assistance.', 'cardcom');
+                    $user_title = __('Payment Processing Error', 'cardcom');
+                }
+                
+                status_header(500);
+                wp_die( $user_message, $user_title, array( 'response' => 500 ) );
             }
             $body = wp_remote_retrieve_body($response);
             $responseArray = array();
@@ -3110,7 +3157,8 @@ function woocommerce_cardcom_init()
             $msg = $exception->getMessage();
             $trace = $exception->getTraceAsString();
             $err_log_info = 'Error ::: ' . $msg . ' | Line ::: ' . $line . ' | Trace ::: ' . $trace;
-            self::cardcom_log($log_title, $err_log_info);
+            // Always log errors regardless of debug setting
+            error_log("Cardcom ::: " . $log_title . " ::: " . $err_log_info . "\n");
         }
 
         /**
@@ -3120,7 +3168,10 @@ function woocommerce_cardcom_init()
          */
         static function cardcom_log($logTitle, $logInfo = "")
         {
-            error_log("Cardcom ::: " . $logTitle . " ::: " . $logInfo . "\n");
+            // Only log if debug mode is enabled in settings
+            if (isset(self::$debug_logging) && self::$debug_logging === '1') {
+                error_log("Cardcom ::: " . $logTitle . " ::: " . $logInfo . "\n");
+            }
         }
 
         /**
@@ -3245,4 +3296,14 @@ function woocommerce_cardcom_init()
 		}
 	}
     WC_Gateway_Cardcom::init(); // add listner to paypal payments
+
+    // Add admin notice when debug_logging is enabled
+    add_action('admin_notices', function() {
+        $cardcom_settings = get_option('woocommerce_cardcom_settings', array());
+        if (isset($cardcom_settings['debug_logging']) && $cardcom_settings['debug_logging'] === '1') {
+            echo '<div class="notice notice-warning is-dismissible">
+                    <p>' . __('CardCom Debug Logging is enabled. Remember to disable it after troubleshooting to avoid excessive log entries.', 'cardcom') . '</p>
+                  </div>';
+        }
+    });
 }
