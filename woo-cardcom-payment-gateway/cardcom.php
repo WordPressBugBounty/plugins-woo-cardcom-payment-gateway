@@ -3,8 +3,8 @@
 Plugin Name: CardCom Payment Gateway
 Plugin URI: https://support.cardcom.solutions/hc/he/articles/360007128393-%D7%97%D7%99%D7%91%D7%95%D7%A8-%D7%94%D7%A1%D7%9C%D7%99%D7%A7%D7%94-%D7%9C%D7%97%D7%A0%D7%95%D7%AA-%D7%95%D7%95%D7%A8%D7%93%D7%A4%D7%A8%D7%A1-Wordpress-Woocommerce-Payment-WOO
 Description: CardCom Payment gateway for Woocommerce
-Version: 3.5.0.3
-Changes: Added Debug Logging feature flag and admin message on network failure
+Version: 3.5.0.4
+Changes: Fixed a minor issue with the admin settings page
 Author: CardCom LTD
 Author URI: http://www.cardcom.co.il
 */
@@ -1058,8 +1058,8 @@ function woocommerce_cardcom_init()
                 'username' => array(
                     'title' => __('API User Name', 'cardcom'),
                     'type' => 'text',
-                    'description' => __('The company API User Name. To test API, input "barak9611"', 'cardcom'),
-                    'default' => 'barak9611'
+                    'description' => __('The company API User Name. To test API, input "CardTest1994"', 'cardcom'),
+                    'default' => 'CardTest1994'
                 ),
                 'apipass' => array(
                     'title' => __('API User Password', 'cardcom'),
@@ -2452,13 +2452,8 @@ function woocommerce_cardcom_init()
                     $token = new WC_Payment_Token_CC();
                     $token->set_gateway_id($this->id);
                     $token->set_token($responseArray['Token']);
-					if( $order_id){
-						$order =  wc_get_order($order_id);
-						$user_id = $order->get_user_id();
-						self::cardcom_log($log_title, $user_id);
-						$token->set_user_id($user_id);
-					}
-					
+                    // Note: User ID assignment is handled separately via save_token_for_user() when needed
+                    
                     $token->set_last4($responseArray['ExtShvaParams_CardNumber5']);
                     $token->set_expiry_year($ExYear);
                     $token->set_expiry_month($ExMonth);
