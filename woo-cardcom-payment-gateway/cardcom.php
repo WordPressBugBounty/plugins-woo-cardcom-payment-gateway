@@ -3,8 +3,8 @@
 Plugin Name: CardCom Payment Gateway
 Plugin URI: https://support.cardcom.solutions/hc/he/articles/360007128393-%D7%97%D7%99%D7%91%D7%95%D7%A8-%D7%94%D7%A1%D7%9C%D7%99%D7%A7%D7%94-%D7%9C%D7%97%D7%A0%D7%95%D7%AA-%D7%95%D7%95%D7%A8%D7%93%D7%A4%D7%A8%D7%A1-Wordpress-Woocommerce-Payment-WOO
 Description: CardCom Payment gateway for Woocommerce
-Version: 3.5.0.4
-Changes: Fixed a minor issue with the admin settings page
+Version: 3.5.0.5
+Changes: Fixed security issues in order meta box actions for refund and cancel actions.
 Author: CardCom LTD
 Author URI: http://www.cardcom.co.il
 */
@@ -278,6 +278,16 @@ function woocommerce_cardcom_init()
 
         public function cardcom_on_order_status_refunded($order)
         {
+
+            // Add authorization check
+            if (!current_user_can('edit_shop_orders') || !current_user_can('manage_woocommerce')) {
+                wp_die(__('You do not have sufficient permissions to perform this action.', 'cardcom'));
+            }
+            
+            // Add nonce verification if this comes from a form submission
+            if (isset($_POST['_wpnonce']) && !wp_verify_nonce($_POST['_wpnonce'], 'woocommerce-process-order-meta')) {
+                wp_die(__('Security check failed.', 'cardcom'));
+            }
 
             $log_title = "cardcom_on_order_status_refunded method";
             self::cardcom_log($log_title, "================== START ==================");
