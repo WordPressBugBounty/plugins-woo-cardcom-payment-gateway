@@ -1,11 +1,11 @@
 === CardCom Payment Gateway ===
-Contributors: Cardcom LTD
+Contributors: Cardcom
 Donate link:
 Tags: woocommerce, payment-gateway, checkout
 Requires at least: 3.3
 Requires PHP: 7.2
 Tested up to: 6.7.1
-Stable tag: 3.5.0.5
+Stable tag: 3.5.0.6
 License: GPLv2 or later
 License URI: https://secure.cardcom.co.il/Html/agreement/agreement.htm
 

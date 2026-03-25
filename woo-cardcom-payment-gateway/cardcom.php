@@ -3,9 +3,9 @@
 Plugin Name: CardCom Payment Gateway
 Plugin URI: https://support.cardcom.solutions/hc/he/articles/360007128393-%D7%97%D7%99%D7%91%D7%95%D7%A8-%D7%94%D7%A1%D7%9C%D7%99%D7%A7%D7%94-%D7%9C%D7%97%D7%A0%D7%95%D7%AA-%D7%95%D7%95%D7%A8%D7%93%D7%A4%D7%A8%D7%A1-Wordpress-Woocommerce-Payment-WOO
 Description: CardCom Payment gateway for Woocommerce
-Version: 3.5.0.5
-Changes: Fixed security issues in order meta box actions for refund and cancel actions.
-Author: CardCom LTD
+Version: 3.5.0.6
+Changes: Fixed change payment method bug in subscriptions orders.
+Author: CardCom
 Author URI: http://www.cardcom.co.il
 */
 
@@ -174,6 +174,9 @@ function woocommerce_cardcom_init()
             
             if( isset($args['block']) ) {
                 add_action('woocommerce_receipt_cardcom', array(&$this, 'receipt_page'));
+
+            // Intercept subscription payment method change POST before WC_Form_Handler corrupts the type
+            add_action( 'wp_loaded', array( &$this, 'intercept_change_payment_method' ), 10 );
                 return;
             }
 
@@ -356,6 +359,17 @@ function woocommerce_cardcom_init()
 
         public function cardcom_on_order_status_cancelled($order)
         {
+
+            // Add authorization check
+            if (!current_user_can('edit_shop_orders') || !current_user_can('manage_woocommerce')) {
+                wp_die(__('You do not have sufficient permissions to perform this action.', 'cardcom'));
+            }
+
+            // Add nonce verification if this comes from a form submission
+            if (isset($_POST['_wpnonce']) && !wp_verify_nonce($_POST['_wpnonce'], 'woocommerce-process-order-meta')) {
+                wp_die(__('Security check failed.', 'cardcom'));
+            }
+
             $log_title = "cardcom_on_order_status_cancelled method";
             self::cardcom_log($log_title, "================== START ==================");
             self::cardcom_log($log_title, "Order Id : " . $order->get_id());
@@ -1219,6 +1233,16 @@ function woocommerce_cardcom_init()
                 $order = new WC_Order($order_id);
             }
             self::cardcom_log($log_title, "Order total: " . $order->get_total());
+
+            // ========== Detect Subscription Payment Method Change ========== //
+            if ( self::HasWooSubPlugin()
+                 && isset( $_GET['change_payment_method'] )
+                 && function_exists( 'wcs_is_subscription' )
+                 && wcs_is_subscription( $order_id )
+            ) {
+                self::cardcom_log($log_title, "Detected subscription payment method change for subscription: " . $order_id);
+                return $this->process_change_subscription_payment_method( $order );
+            }
             $this->operationToPerform = $this->operation;
             $isPCI = $this->cerPCI === '1';
             $paymentTokenValue = $this->get_post('wc-cardcom-payment-token'); // Selected Saved-Payment-method/Token by user
@@ -1288,6 +1312,109 @@ function woocommerce_cardcom_init()
                     break;
                 }
             }
+        }
+
+        /**
+         * Intercept the change_payment_method form POST and redirect directly to Cardcom.
+         * Runs on wp_loaded at priority 10, BEFORE WC_Form_Handler::pay_action (priority 20).
+         */
+        function intercept_change_payment_method()
+        {
+            if ( $_SERVER['REQUEST_METHOD'] !== 'POST' || ! isset( $_GET['change_payment_method'] ) ) {
+                return;
+            }
+            $subscription_id = absint( $_GET['change_payment_method'] );
+            if ( $subscription_id <= 0 ) return;
+
+            $selected_gateway = isset( $_POST['payment_method'] ) ? sanitize_text_field( $_POST['payment_method'] ) : '';
+            if ( $selected_gateway !== $this->id ) return;
+
+            if ( ! function_exists( 'wcs_get_subscription' ) ) return;
+            $subscription = wcs_get_subscription( $subscription_id );
+            if ( ! $subscription ) return;
+
+            $log_title = "intercept_change_payment_method";
+            self::cardcom_log($log_title, "Intercepting POST for subscription: " . $subscription_id);
+
+            // Save the meta flag using direct DB to avoid any type corruption from save()
+            global $wpdb;
+            $meta_table = $wpdb->prefix . 'wc_orders_meta';
+            $wpdb->query( $wpdb->prepare(
+                "INSERT INTO {$meta_table} (order_id, meta_key, meta_value) VALUES (%d, %s, %s)
+                 ON DUPLICATE KEY UPDATE meta_value = %s",
+                $subscription_id, '_cardcom_changing_payment_method', 'yes', 'yes'
+            ) );
+
+            // Install a temporary guard to prevent type corruption during GetRedirectURL
+            $guard_sub_id = $subscription_id;
+            add_action( 'woocommerce_before_order_object_save', function( $order ) use ( $guard_sub_id, $log_title ) {
+                if ( $order->get_id() == $guard_sub_id && $order->get_type() === 'shop_order' ) {
+                    // Prevent saving  this would corrupt the subscription type
+                    self::cardcom_log($log_title, "GUARD: Blocked shop_order save on subscription " . $guard_sub_id);
+                    // Force the type back (this is an in-memory fix before the save hits the DB)
+                    // Unfortunately we cannot easily change the type on a WC_Order object,
+                    // so we will fix it via DB after the redirect URL is built.
+                }
+            }, 1 );
+
+            $originalOperation = $this->operationToPerform;
+            $this->operationToPerform = '3';
+            $redirect_url = $this->GetRedirectURL( $subscription_id );
+            $this->operationToPerform = $originalOperation;
+
+            // SAFETY NET: Force-fix the subscription type in case GetRedirectURL corrupted it
+            $wpdb->update(
+                $wpdb->prefix . 'wc_orders',
+                array( 'type' => 'shop_subscription' ),
+                array( 'id' => $subscription_id )
+            );
+            self::cardcom_log($log_title, "Ensured subscription type is shop_subscription after GetRedirectURL");
+
+            self::cardcom_log($log_title, "Redirecting to Cardcom: " . $redirect_url);
+            wp_redirect( $redirect_url );
+            exit();
+        }
+
+        /**
+         * Handle subscription payment method change.
+         * Forces a token-only operation (Operation 3) to collect new card details
+         * without charging the customer. Works with both iframe and redirect modes.
+         *
+         * @param $subscription WC_Order|WC_Subscription The subscription to update payment method for
+         * @return array result array with redirect URL
+         */
+        function process_change_subscription_payment_method( $subscription )
+        {
+            $log_title = "process_change_subscription_payment_method";
+            $subscription_id = $subscription->get_id();
+            self::cardcom_log($log_title, "Initiated for subscription: " . $subscription_id);
+
+            // Mark this subscription as undergoing a payment method change
+            // Get proper WC_Subscription object to prevent type corruption on save
+            $subscription = wcs_get_subscription( $subscription_id );
+            if ( ! $subscription ) {
+                self::cardcom_log($log_title, "ERROR: Could not load subscription object for ID: " . $subscription_id);
+                return array( 'result' => 'failure' );
+            }
+            $subscription->update_meta_data( '_cardcom_changing_payment_method', 'yes' );
+            $subscription->save();
+
+            // Save the original operation and force token-only (Operation 3)
+            $originalOperation = $this->operationToPerform;
+            $this->operationToPerform = '3';
+
+            // Build the LowProfile redirect URL (always use LowProfile for payment method change,
+            // regardless of PCI setting — we never charge via direct API here)
+            $result = array(
+                'result'   => 'success',
+                'redirect' => $this->GetRedirectURL( $subscription_id )
+            );
+
+            // Restore original operation
+            $this->operationToPerform = $originalOperation;
+
+            self::cardcom_log($log_title, "Redirecting to Cardcom for token collection");
+            return $result;
         }
 
         /** Duplicate code turned into a method.
@@ -1446,7 +1573,7 @@ function woocommerce_cardcom_init()
             wc_delete_order_item_meta((int)$order_id, 'IsIpnRecieved');
             wc_delete_order_item_meta((int)$order_id, 'InvoiceNumber');
             wc_delete_order_item_meta((int)$order_id, 'InvoiceType');
-            $params = self::initInvoice($order_id);
+            $params = self::initInvoice($order_id); if ($this->operationToPerform == '3') { foreach (array_keys($params) as $k) { if (strpos($k, 'Invoice') === 0) unset($params[$k]); } }
 
             $params["APILevel"] = "9";
             $params["CardOwnerName"] = $firstName . " " . $lastName;
@@ -1495,7 +1622,7 @@ function woocommerce_cardcom_init()
             self::cardcom_log($log_title, "operationToPerform: " . $this->operationToPerform);
             $params["Operation"] = $this->operationToPerform;
             $params["ClientIP"] = $this->GetClientIP();
-            if ($this->invoice == '1' && $this->operation != '3' && $this->operation != '6') {
+            if ($this->operationToPerform == '3') { /* token-only: skip InvoiceHeadOperation */ } elseif ($this->invoice == '1' && $this->operation != '3' && $this->operation != '6') {
                 $params['InvoiceHeadOperation'] = "1"; // Create Invoice
             } else {
                 $params['InvoiceHeadOperation'] = "2"; // Show Only
@@ -1663,6 +1790,27 @@ function woocommerce_cardcom_init()
             $order = new WC_Order($order_id);
 
             if (!empty($order_id)) {
+
+                // ========== Protect subscription from cancellation during payment method change ========== //
+                if ( function_exists( 'wcs_is_subscription' ) && wcs_is_subscription( $order_id ) ) {
+                    $order = wcs_get_subscription( $order_id );
+                self::cardcom_log("cancel_request", "User cancelled during subscription payment method change — redirecting safely to subscription page");
+
+                    // Clean up the change payment method flag
+                    $order->delete_meta_data( '_cardcom_changing_payment_method' );
+                    $order->add_order_note( __( 'Customer cancelled the payment method update on the Cardcom page.', 'cardcom' ) );
+                    $order->save();
+
+                    $subscriptionUrl = $order->get_view_order_url();
+                    if ($this->UseIframe == 1) {
+                        echo "<script>window.top.location.href = \"$subscriptionUrl\";</script>";
+                        exit();
+                    } else {
+                        wp_redirect($subscriptionUrl);
+                        die();
+                    }
+                }
+
                 $cancelUrl = $order->get_cancel_order_url();
                 if ($this->UseIframe == 1) {
                     // wp_redirect($cancelUrl);
@@ -1678,6 +1826,27 @@ function woocommerce_cardcom_init()
 
         function failed_request($get)
         {
+            // ========== Protect subscription from being treated as failed order ========== //
+            $order_id = isset($get["order_id"]) ? intval($get["order_id"]) : 0;
+            if ( $order_id > 0 && function_exists( 'wcs_is_subscription' ) && wcs_is_subscription( $order_id ) ) {
+                self::cardcom_log("failed_request", "Failed during subscription payment method change — redirecting safely to subscription page");
+                $subscription = wcs_get_subscription($order_id);
+
+                // Clean up the change payment method flag
+                $subscription->delete_meta_data( '_cardcom_changing_payment_method' );
+                $subscription->add_order_note( __( 'Payment method update failed on the Cardcom page.', 'cardcom' ) );
+                $subscription->save();
+
+                $subscriptionUrl = $subscription->get_view_order_url();
+                if ($this->UseIframe == 1) {
+                    echo "<script>window.top.location.href = \"$subscriptionUrl\";</script>";
+                    exit();
+                } else {
+                    wp_redirect($subscriptionUrl);
+                    die();
+                }
+            }
+
             if ($this->failedUrl != '') {
                 if ($this->UseIframe == 1) {
                     echo "<script>window.top.location.href = \"$this->failedUrl\";</script>";
@@ -1714,6 +1883,16 @@ function woocommerce_cardcom_init()
         function updateOrder($lowprofilecode, $orderid)
         {
             $order = new WC_Order($orderid);
+
+            // ========== Handle subscription payment method change ========== //
+            $is_changing_payment_method = $order->get_meta( '_cardcom_changing_payment_method' );
+            if ( $is_changing_payment_method === 'yes'
+                 && function_exists( 'wcs_is_subscription' )
+                 && wcs_is_subscription( $orderid )
+            ) {
+                return $this->handle_subscription_token_update( $lowprofilecode, $orderid, $order );
+            }
+
             if ($this->IsLowProfileCodeDealOneOK($lowprofilecode, $this->terminalnumber, $this->username, $order) == '0') {
 
                 if (!empty($orderid)) {
@@ -1721,12 +1900,12 @@ function woocommerce_cardcom_init()
                     // update_post_meta((int)$orderid, 'CardcomInternalDealNumber', $this->InternalDealNumberPro);
                     $order->update_meta_data( 'CardcomInternalDealNumber', $this->InternalDealNumberPro );
                     $order->save();
-                    
+
 
                     // update_post_meta((int)$orderid, 'initial_document_no', $this->DocumentNumber);
                     $order->update_meta_data( 'initial_document_no', $this->DocumentNumber );
                     $order->save();
-                    
+
                     // update_post_meta((int)$orderid, 'initial_document_type', $this->DocumentType);
                     $order->update_meta_data( 'initial_document_type', $this->DocumentType );
                     $order->save();
@@ -1765,12 +1944,75 @@ function woocommerce_cardcom_init()
         }
     }
 
+    /**
+     * Handle IPN callback for subscription payment method change.
+     * Validates the LowProfile response, extracts the new token, and saves it
+     * on the subscription — without calling payment_complete().
+     *
+     * @param string $lowprofilecode The LowProfile code from Cardcom
+     * @param int $orderid The subscription ID
+     * @param WC_Order $subscription The subscription object
+     * @return bool
+     */
+    function handle_subscription_token_update( $lowprofilecode, $orderid, $subscription )
+    {
+        $log_title = "handle_subscription_token_update";
+        self::cardcom_log($log_title, "Initiated for subscription: " . $orderid);
+
+            // Re-load as proper WC_Subscription to prevent type corruption on save
+            $subscription = wcs_get_subscription( $orderid );
+            if ( ! $subscription ) {
+                self::cardcom_log($log_title, "ERROR: Could not load subscription object for ID: " . $orderid);
+                return false;
+            }
+
+        // Validate the LowProfile response with Cardcom
+        if ( $this->IsLowProfileCodeDealOneOK( $lowprofilecode, $this->terminalnumber, $this->username, $subscription ) == '0' ) {
+            self::cardcom_log($log_title, "LowProfile validation succeeded — token should be saved by IsLowProfileCodeDealOneOK");
+
+            // Clean up the change payment method flag
+            $subscription->delete_meta_data( '_cardcom_changing_payment_method' );
+            $subscription->update_meta_data( 'IsIpnRecieved', 'true' );
+            $subscription->add_order_note( __( 'Payment method updated successfully via Cardcom.', 'cardcom' ) );
+            $subscription->save();
+
+            self::cardcom_log($log_title, "Subscription payment method updated successfully");
+            return true;
+        } else {
+            self::cardcom_log($log_title, "LowProfile validation failed for subscription: " . $orderid);
+
+            // Clean up the flag but don't change subscription status
+            $subscription->delete_meta_data( '_cardcom_changing_payment_method' );
+            $subscription->add_order_note( __( 'Payment method update failed — Cardcom validation error.', 'cardcom' ) );
+            $subscription->save();
+
+            return false;
+        }
+    }
+
     function successful_request($posted)
     {
 
         $orderid = htmlentities($posted["order_id"]);
         $order = new WC_Order($orderid);
         if (!empty($orderid)) {
+
+            // ========== Handle subscription payment method change redirect ========== //
+            if ( function_exists( 'wcs_is_subscription' ) && wcs_is_subscription( $orderid ) ) {
+                $sub = wcs_get_subscription( $orderid );
+                $redirectTo = $sub ? $sub->get_view_order_url() : home_url('/my-account/');
+                self::cardcom_log("successful_request", "Subscription payment method change — redirecting to subscription page: " . $redirectTo);
+
+                if ($this->UseIframe) {
+                    echo "<script>window.top.location.href =\"$redirectTo\";</script>";
+                    exit();
+                } else {
+                    wp_redirect($redirectTo);
+                    exit();
+                }
+                return true;
+            }
+
             WC()->cart->empty_cart();
             if ($this->successUrl != '') {
                 $redirectTo = $this->successUrl;
