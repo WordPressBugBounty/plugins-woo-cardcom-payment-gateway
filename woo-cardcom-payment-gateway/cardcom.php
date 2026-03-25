@@ -3,8 +3,8 @@
 Plugin Name: CardCom Payment Gateway
 Plugin URI: https://support.cardcom.solutions/hc/he/articles/360007128393-%D7%97%D7%99%D7%91%D7%95%D7%A8-%D7%94%D7%A1%D7%9C%D7%99%D7%A7%D7%94-%D7%9C%D7%97%D7%A0%D7%95%D7%AA-%D7%95%D7%95%D7%A8%D7%93%D7%A4%D7%A8%D7%A1-Wordpress-Woocommerce-Payment-WOO
 Description: CardCom Payment gateway for Woocommerce
-Version: 3.5.0.6
-Changes: Fixed change payment method bug in subscriptions orders.
+Version: 3.5.0.7
+Changes: Fixed typo and version number for logger.
 Author: CardCom
 Author URI: http://www.cardcom.co.il
 */
@@ -55,7 +55,7 @@ function woocommerce_cardcom_init()
         static $IsActivateInvoiceForPaypal;
         static $SendToEmailInvoiceForPaypal;
         static $debug_logging;
-        static $plugin = "WOO-3.5.0.3";
+        static $plugin = "WOO-3.5.0.7";
         static $CardComURL = 'https://secure.cardcom.solutions'; // Production URL
 
         //declaring properties because dynamic properties are no longer supported in PHP 8.2
@@ -1685,7 +1685,7 @@ function woocommerce_cardcom_init()
                         break;
                     }
                     // ======= Fails (Write error message ONCE if after the other 3 tries ALSO failed) ======= //
-                    if (counter == 0) {
+                    if ($counter == 0) {
                         // Always log critical API connection failures
                         error_log("Cardcom ::: post failed ::: Url : " . $url);
                         $error = $response->get_error_message();
