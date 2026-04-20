@@ -3,8 +3,8 @@
 Plugin Name: CardCom Payment Gateway
 Plugin URI: https://support.cardcom.solutions/hc/he/articles/360007128393-%D7%97%D7%99%D7%91%D7%95%D7%A8-%D7%94%D7%A1%D7%9C%D7%99%D7%A7%D7%94-%D7%9C%D7%97%D7%A0%D7%95%D7%AA-%D7%95%D7%95%D7%A8%D7%93%D7%A4%D7%A8%D7%A1-Wordpress-Woocommerce-Payment-WOO
 Description: CardCom Payment gateway for Woocommerce
-Version: 3.5.0.7
-Changes: Fixed typo and version number for logger.
+Version: 3.5.0.8
+Changes: cancel and refund permissions validation.
 Author: CardCom
 Author URI: http://www.cardcom.co.il
 */
@@ -55,7 +55,7 @@ function woocommerce_cardcom_init()
         static $IsActivateInvoiceForPaypal;
         static $SendToEmailInvoiceForPaypal;
         static $debug_logging;
-        static $plugin = "WOO-3.5.0.7";
+        static $plugin = "WOO-3.5.0.8";
         static $CardComURL = 'https://secure.cardcom.solutions'; // Production URL
 
         //declaring properties because dynamic properties are no longer supported in PHP 8.2
@@ -249,6 +249,8 @@ function woocommerce_cardcom_init()
 
                 $adminnotice->remove_notice('cardcom_on_order_status_refunded');
                 $adminnotice->remove_notice('cardcom_on_order_status_cancelled');
+                $adminnotice->remove_notice('cardcom_on_order_status_refunded_permission_denied');
+                $adminnotice->remove_notice('cardcom_on_order_status_cancelled_permission_denied');
             }
 
         }
@@ -281,15 +283,15 @@ function woocommerce_cardcom_init()
 
         public function cardcom_on_order_status_refunded($order)
         {
+            if ( ! $order || ! current_user_can( 'edit_shop_order', $order->get_id() ) ) {
+                $msg = ! $order
+                    ? __( 'Unable to process Cardcom refund action: order not found.', 'cardcom' )
+                    : __( 'You do not have permission to run this Cardcom refund action.', 'cardcom' );
 
-            // Add authorization check
-            if (!current_user_can('edit_shop_orders') || !current_user_can('manage_woocommerce')) {
-                wp_die(__('You do not have sufficient permissions to perform this action.', 'cardcom'));
-            }
-            
-            // Add nonce verification if this comes from a form submission
-            if (isset($_POST['_wpnonce']) && !wp_verify_nonce($_POST['_wpnonce'], 'woocommerce-process-order-meta')) {
-                wp_die(__('Security check failed.', 'cardcom'));
+                $adminnotice = new WC_Admin_Notices();
+                $adminnotice->add_custom_notice( 'cardcom_on_order_status_refunded_permission_denied', $msg );
+                $adminnotice->output_custom_notices();
+                return;
             }
 
             $log_title = "cardcom_on_order_status_refunded method";
@@ -359,15 +361,15 @@ function woocommerce_cardcom_init()
 
         public function cardcom_on_order_status_cancelled($order)
         {
+            if ( ! $order || ! current_user_can( 'edit_shop_order', $order->get_id() ) ) {
+                $msg = ! $order
+                    ? __( 'Unable to process Cardcom cancel action: order not found.', 'cardcom' )
+                    : __( 'You do not have permission to run this Cardcom cancel action.', 'cardcom' );
 
-            // Add authorization check
-            if (!current_user_can('edit_shop_orders') || !current_user_can('manage_woocommerce')) {
-                wp_die(__('You do not have sufficient permissions to perform this action.', 'cardcom'));
-            }
-
-            // Add nonce verification if this comes from a form submission
-            if (isset($_POST['_wpnonce']) && !wp_verify_nonce($_POST['_wpnonce'], 'woocommerce-process-order-meta')) {
-                wp_die(__('Security check failed.', 'cardcom'));
+                $adminnotice = new WC_Admin_Notices();
+                $adminnotice->add_custom_notice( 'cardcom_on_order_status_cancelled_permission_denied', $msg );
+                $adminnotice->output_custom_notices();
+                return;
             }
 
             $log_title = "cardcom_on_order_status_cancelled method";
