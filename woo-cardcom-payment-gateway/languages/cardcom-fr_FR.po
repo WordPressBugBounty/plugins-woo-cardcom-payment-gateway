@@ -1,0 +1,11 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: cardcom\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: fr_FR\n"
+
+#: cardcom.php:3555 cardcom.php:3621
+msgid "Tax / Company ID"
+msgstr "N° fiscal / SIRET"

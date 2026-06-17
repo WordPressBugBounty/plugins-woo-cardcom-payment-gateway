@@ -3,8 +3,8 @@
 Plugin Name: CardCom Payment Gateway
 Plugin URI: https://support.cardcom.solutions/hc/he/articles/360007128393-%D7%97%D7%99%D7%91%D7%95%D7%A8-%D7%94%D7%A1%D7%9C%D7%99%D7%A7%D7%94-%D7%9C%D7%97%D7%A0%D7%95%D7%AA-%D7%95%D7%95%D7%A8%D7%93%D7%A4%D7%A8%D7%A1-Wordpress-Woocommerce-Payment-WOO
 Description: CardCom Payment gateway for Woocommerce
-Version: 3.5.0.8
-Changes: cancel and refund permissions validation.
+Version: 3.5.0.9
+Changes: Added optional/required Tax-Company ID (TZ/CP) checkout field with localized labels.
 Author: CardCom
 Author URI: http://www.cardcom.co.il
 */
@@ -55,7 +55,7 @@ function woocommerce_cardcom_init()
         static $IsActivateInvoiceForPaypal;
         static $SendToEmailInvoiceForPaypal;
         static $debug_logging;
-        static $plugin = "WOO-3.5.0.8";
+        static $plugin = "WOO-3.5.0.9";
         static $CardComURL = 'https://secure.cardcom.solutions'; // Production URL
 
         //declaring properties because dynamic properties are no longer supported in PHP 8.2
@@ -70,6 +70,7 @@ function woocommerce_cardcom_init()
         public string $failedUrl;
         public string $successUrl;
         public string $InvoiceVATFREE;
+        public string $id_field;
 
         function __construct( $args = [])
         {
@@ -171,7 +172,8 @@ function woocommerce_cardcom_init()
                 self::$debug_logging = '0';
             }
 
-            
+            $this->id_field = $this->settings['id_field'] ?? 'hidden';
+
             if( isset($args['block']) ) {
                 add_action('woocommerce_receipt_cardcom', array(&$this, 'receipt_page'));
 
@@ -189,6 +191,11 @@ function woocommerce_cardcom_init()
 
             // Hooks
             add_action('woocommerce_update_options_payment_gateways_' . $this->id, array($this, 'process_admin_options'));
+
+            if ( $this->enabled === 'yes' && $this->id_field !== 'hidden' ) {
+                add_filter( 'woocommerce_billing_fields', array( $this, 'add_id_billing_field' ) );
+                add_action( 'woocommerce_checkout_update_order_meta', array( $this, 'save_id_billing_field' ) );
+            }
 
             // Hook on order status events
             add_filter('woocommerce_payment_complete_order_status', array($this, 'change_payment_complete_order_status'), 10, 3);
@@ -959,6 +966,22 @@ function woocommerce_cardcom_init()
                 $ItemsCount++;
                 $AddToString = $ItemsCount;
             }
+            // ID number (ת.ז / ח.פ) -> InvoiceHead.CompID
+            // Resolve the value from every place it can live:
+            //  - Classic checkout: save_id_billing_field() writes the canonical "_cardcom_id_number".
+            //  - Blocks checkout: WooCommerce auto-saves "address" additional fields to
+            //    "_wc_billing/<field-id>" / "_wc_shipping/<field-id>" (field id "cardcom/id-number").
+            $id_number = $order->get_meta( '_cardcom_id_number' );
+            if ( empty( $id_number ) ) {
+                $id_number = $order->get_meta( '_wc_billing/cardcom/id-number' );
+            }
+            if ( empty( $id_number ) ) {
+                $id_number = $order->get_meta( '_wc_shipping/cardcom/id-number' );
+            }
+            if ( ! empty( $id_number ) ) {
+                $params['InvoiceHead.CompID'] = $id_number;
+            }
+
             $params = apply_filters('cardcom_init_invoice_params', $params, $order);
             return $params;
         }
@@ -1183,6 +1206,18 @@ function woocommerce_cardcom_init()
                     'description' => __('Send Paypal Invoice to Email', 'cardcom'),
                     'options' => array('1' => 'Yes', '0' => 'No'),
                     'default' => '1'
+                ),
+                'id_field' => array(
+                    'title'       => __( 'ID Number Field (Tax / Company ID)', 'cardcom' ),
+                    'label'       => __( 'ID Number Field', 'cardcom' ),
+                    'type'        => 'select',
+                    'options'     => array(
+                        'hidden'   => __( 'Hidden', 'cardcom' ),
+                        'optional' => __( 'Optional', 'cardcom' ),
+                        'required' => __( 'Required', 'cardcom' ),
+                    ),
+                    'description' => __( 'Add an ID number field (personal Tax ID or business Company ID) to checkout, and choose whether it\'s optional or required. The number appears on the customer\'s invoice.', 'cardcom' ),
+                    'default'     => 'hidden',
                 ),
             );
 }
@@ -3514,6 +3549,28 @@ function woocommerce_cardcom_init()
             return $int_value;
         }
         //endregion
+
+        public function add_id_billing_field( $fields ) {
+            $fields['cardcom_id_number'] = array(
+                'label'    => __( 'Tax / Company ID', 'cardcom' ),
+                'required' => ( $this->id_field === 'required' ),
+                'class'    => array( 'form-row-wide' ),
+                'priority' => 35,
+            );
+            return $fields;
+        }
+
+        public function save_id_billing_field( $order_id ) {
+            if ( ! empty( $_POST['cardcom_id_number'] ) ) {
+                $order = wc_get_order( $order_id );
+                if ( ! $order ) {
+                    return;
+                }
+                $order->update_meta_data( '_cardcom_id_number', sanitize_text_field( wp_unslash( $_POST['cardcom_id_number'] ) ) );
+                $order->save();
+            }
+        }
+
     }
     // Include the block class
     require_once __DIR__ . '/blocks/class-wc-cardcom-payment-block.php';
@@ -3545,6 +3602,27 @@ function woocommerce_cardcom_init()
 		}
 	}
     WC_Gateway_Cardcom::init(); // add listner to paypal payments
+
+    add_action( 'woocommerce_init', function() {
+        if ( ! function_exists( 'woocommerce_register_additional_checkout_field' ) ) {
+            return;
+        }
+        $settings = get_option( 'woocommerce_cardcom_settings', array() );
+        $enabled  = isset( $settings['enabled'] ) ? $settings['enabled'] : 'no';
+        if ( $enabled !== 'yes' ) {
+            return;
+        }
+        $id_field = isset( $settings['id_field'] ) ? $settings['id_field'] : 'hidden';
+        if ( $id_field === 'hidden' ) {
+            return;
+        }
+        woocommerce_register_additional_checkout_field( array(
+            'id'       => 'cardcom/id-number',
+            'label'    => __( 'Tax / Company ID', 'cardcom' ),
+            'location' => 'address',
+            'required' => ( $id_field === 'required' ),
+        ) );
+    } );
 
     // Add admin notice when debug_logging is enabled
     add_action('admin_notices', function() {

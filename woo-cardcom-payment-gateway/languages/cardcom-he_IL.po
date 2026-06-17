@@ -390,6 +390,23 @@ msgstr "עסקת חידוש - "
 msgid "Cardcom Deal Number - "
 msgstr "מספר העסקה בקארדקום - "
 
+#: cardcom.php:3555 cardcom.php:3621
+msgid "Tax / Company ID"
+msgstr "מספר ת.ז / ח.פ."
+
+#: cardcom.php:1211
+msgid "ID Number Field (Tax / Company ID)"
+msgstr "שדה מספר זיהוי (ת.ז / ח.פ.)"
+
+#: cardcom.php:1219
+msgid ""
+"Add an ID number field (personal Tax ID or business Company ID) to checkout, "
+"and choose whether it's optional or required. The number appears on the "
+"customer's invoice."
+msgstr ""
+"הוסף שדה מספר זיהוי (ת.ז של אדם פרטי או ח.פ של עסק) לקופה, ובחר אם הוא יהיה "
+"אופציונלי או חובה. המספר יופיע בחשבונית של הלקוח."
+
 #~ msgid ""
 #~ " - Capture Charge - (Requires Cardcom's Token module + J5 authorization "
 #~ "via acquirer)The payment page will \"Capture\" a sum to later charge.The "

@@ -5,7 +5,7 @@ Tags: woocommerce, payment-gateway, checkout
 Requires at least: 3.3
 Requires PHP: 7.2
 Tested up to: 6.7.1
-Stable tag: 3.5.0.8
+Stable tag: 3.5.0.9
 License: GPLv2 or later
 License URI: https://secure.cardcom.co.il/Html/agreement/agreement.htm
 
@@ -23,6 +23,7 @@ Allows your website to receive payments from your customers, via the WooCommerce
 This plugin supports various configurations & setups:
 
 * WooCommerce Blocks
+* Optional/required Tax-Company ID (TZ/CP) field at checkout, added to the invoice, with localized labels.
 * Making credit-card deals & saving as "Payment Method" for returning customers.
 * Making Credit-line "delayed" payments (aka "Capture charge")
 * PayPal integration

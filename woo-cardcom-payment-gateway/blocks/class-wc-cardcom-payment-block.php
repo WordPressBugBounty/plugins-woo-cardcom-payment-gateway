@@ -105,9 +105,8 @@ final class WC_Gateway_Cardcom_Blocks_Support extends AbstractPaymentMethodType 
 			'does_operation_compatible_with_PCI_fields' => $this->gateway->does_operation_compatible_with_PCI_fields(),
 			'must_cvv'    => $this->gateway::$must_cvv,
 			'showSaveOption' => $this->gateway->allows_to_optionally_save_tokens(),
-			'showSavedCards' => $this->gateway->supports('tokenization') && is_checkout() && $this->gateway->operation_allows_to_pay_via_tokens()
-
-            // more data to get added
+			'showSavedCards' => $this->gateway->supports('tokenization') && is_checkout() && $this->gateway->operation_allows_to_pay_via_tokens(),
+			'id_field'       => $this->gateway->id_field,
 		];
 	}
 }
