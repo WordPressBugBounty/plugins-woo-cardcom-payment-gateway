@@ -3,13 +3,42 @@
 Plugin Name: CardCom Payment Gateway
 Plugin URI: https://support.cardcom.solutions/hc/he/articles/360007128393-%D7%97%D7%99%D7%91%D7%95%D7%A8-%D7%94%D7%A1%D7%9C%D7%99%D7%A7%D7%94-%D7%9C%D7%97%D7%A0%D7%95%D7%AA-%D7%95%D7%95%D7%A8%D7%93%D7%A4%D7%A8%D7%A1-Wordpress-Woocommerce-Payment-WOO
 Description: CardCom Payment gateway for Woocommerce
-Version: 3.5.0.9
-Changes: Added optional/required Tax-Company ID (TZ/CP) checkout field with localized labels.
+Version: 3.5.1.0
+Changes: Security fix (CVE-2025-57976) - validate the WooCommerce order key on Cardcom callback requests to block unauthorized order/subscription state changes (temporary grace period for in-flight checkouts until 2026-09-02, see CARDCOM_KEY_GRACE_UNTIL -- remove next release); declared WooCommerce HPOS and Cart/Checkout Blocks compatibility (order meta is now HPOS-safe); null-safe gateway settings.
 Author: CardCom
 Author URI: http://www.cardcom.co.il
+Requires PHP: 7.4
+Requires Plugins: woocommerce
+WC tested up to: 10.8.1
 */
 
 add_action('plugins_loaded', 'woocommerce_cardcom_init', 0);
+
+/**
+ * ============================== TEMPORARY -- REMOVE IN THE NEXT RELEASE ==============================
+ * Rollout grace period for the CVE-2025-57976 order-key fix (see cardcom_is_valid_listener_request()).
+ * Deals created by pre-fix code have no &key= on their callback URLs at all; a fixed cutover date (rather
+ * than a per-site rolling window) gives every store the SAME deadline to finish any checkout started
+ * before this update, after which a missing key is rejected exactly like a wrong one -- no exceptions.
+ * DELETE this constant and the grace-period branch in cardcom_is_valid_listener_request() once this
+ * version has been out long enough that no pre-fix deal can still be in flight.
+ * =======================================================================================================
+ */
+define( 'CARDCOM_KEY_GRACE_UNTIL', '2026-09-02 00:00:00' );
+
+/**
+ * Declare compatibility with WooCommerce features.
+ *
+ * Registered at file load (before WooCommerce fires before_woocommerce_init):
+ *  - custom_order_tables (HPOS - High-Performance Order Storage): order data is read/written via order CRUD.
+ *  - cart_checkout_blocks: see WC_Gateway_Cardcom_Blocks_Support.
+ */
+add_action('before_woocommerce_init', function () {
+    if (class_exists(\Automattic\WooCommerce\Utilities\FeaturesUtil::class)) {
+        \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility('custom_order_tables', __FILE__, true);
+        \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility('cart_checkout_blocks', __FILE__, true);
+    }
+});
 
 /**
  * Load plugin textdomain.
@@ -55,7 +84,7 @@ function woocommerce_cardcom_init()
         static $IsActivateInvoiceForPaypal;
         static $SendToEmailInvoiceForPaypal;
         static $debug_logging;
-        static $plugin = "WOO-3.5.0.9";
+        static $plugin = "WOO-3.5.1.0";
         static $CardComURL = 'https://secure.cardcom.solutions'; // Production URL
 
         //declaring properties because dynamic properties are no longer supported in PHP 8.2
@@ -96,24 +125,17 @@ function woocommerce_cardcom_init()
             // Load plugin checkout icon; Currently the icon we have is obsolete and should not be used
             // $this->icon = PLUGIN_DIRECTORY.'images/cards.png';
 
-            //Load Language by Define if WPML ACTIVE //https://wpml.org/forums/topic/how-to-check-if-wpml-is-installed-and-active/
+            // Resolve the language shown on the Cardcom Low Profile page:
+            // PolyLang current language, then WPML, then the saved "Payment Gateway Language" setting.
             global $sitepress;
-
-
-            // Set Language dynamically according to "PolyLang", Ref to code:
-            // - https://polylang.pro/doc/function-reference/#pll_current_language
-            if (function_exists("pll_current_language")) {
-                $this->lang = pll_current_language('slug');
+            if ( function_exists( 'pll_current_language' ) ) {
+                $this->lang = pll_current_language( 'slug' ) ?: 'en';
                 $this->isML = true;
-            }
-            // Set Language dynamically according to "WordPress Multilingual Plugin", ref to code:
-            // - https://wpml.org/forums/topic/get-current-language-in-functions-php/
-            // - https://wpml.org/forums/topic/how-to-define-redirect-url-that-automatically-represent-current-language/
-            elseif (function_exists('icl_object_id') && defined('ICL_LANGUAGE_CODE') && isset($sitepress)) {
+            } elseif ( function_exists( 'icl_object_id' ) && defined( 'ICL_LANGUAGE_CODE' ) && isset( $sitepress ) ) {
                 $this->lang = ICL_LANGUAGE_CODE;
                 $this->isML = true;
             } else {
-                $this->lang = $this->settings['lang'];
+                $this->lang = $this->settings['lang'] ?? 'en';
                 $this->isML = false;
             }
 
@@ -122,9 +144,9 @@ function woocommerce_cardcom_init()
             $this->description = $this->settings['description'];
             $this->enabled = $this->settings['enabled'];
             $this->terminalnumber = $this->settings['terminalnumber'];
-            $this->adminEmail = $this->settings['adminEmail'];
+            $this->adminEmail = $this->settings['adminEmail'] ?? '';
             $this->username = $this->settings['username'];
-            $this->currency = $this->settings['currency'];
+            $this->currency = $this->settings['currency'] ?? '0';
             if (isset($this->settings['CerPCI'])) {
                 $this->cerPCI = $this->settings['CerPCI'];
             } else {
@@ -138,11 +160,11 @@ function woocommerce_cardcom_init()
                 $this->operation = '1';
             }
             $this->operationToPerform = $this->operation;
-            $this->invoice = $this->settings['invoice'];
-            $this->maxpayment = $this->settings['maxpayment'];
-            $this->UseIframe = $this->settings['UseIframe'];
-            $this->OrderStatus = $this->settings['OrderStatus'];
-            $this->InvoiceVATFREE = $this->settings['InvoiceVATFREE'];
+            $this->invoice = $this->settings['invoice'] ?? '1';
+            $this->maxpayment = $this->settings['maxpayment'] ?? '1';
+            $this->UseIframe = $this->settings['UseIframe'] ?? '0';
+            $this->OrderStatus = $this->settings['OrderStatus'] ?? 'completed';
+            $this->InvoiceVATFREE = $this->settings['InvoiceVATFREE'] ?? '2';
             // $this->failedUrl = $this->settings['failedUrl'];
             // $this->successUrl = $this->settings['successUrl'];
             $this->failedUrl = '';
@@ -192,6 +214,7 @@ function woocommerce_cardcom_init()
             // Hooks
             add_action('woocommerce_update_options_payment_gateways_' . $this->id, array($this, 'process_admin_options'));
 
+            // Add the classic-checkout filters whenever the ID field is shown (optional or required).
             if ( $this->enabled === 'yes' && $this->id_field !== 'hidden' ) {
                 add_filter( 'woocommerce_billing_fields', array( $this, 'add_id_billing_field' ) );
                 add_action( 'woocommerce_checkout_update_order_meta', array( $this, 'save_id_billing_field' ) );
@@ -270,7 +293,7 @@ function woocommerce_cardcom_init()
             add_action('valid-paypal-standard-ipn-request', array(get_called_class(), 'ValidatePaypalRequest')); // For "PayPal Standard" gateway
             //  add_action( 'woocommerce_paypal_express_checkout_valid_ipn_request', array(get_called_class(), 'CreateinvoiceForPayPal' ) ); // For "Paypal Express Checkout"
             add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), [ get_called_class(), 'plugin_action_links' ] );
-            
+
 
         }
 
@@ -532,9 +555,10 @@ function woocommerce_cardcom_init()
                 self::cardcom_log($log_title, "'IsActivateInvoiceForPaypal' option is not active/on");
                 return;
             }
-            wc_delete_order_item_meta((int)$order_id, 'InvoiceNumber');
-            wc_delete_order_item_meta((int)$order_id, 'InvoiceType');
             $order = new WC_Order($order_id);
+            // NOTE: do NOT clear InvoiceNumber/InvoiceType here -- the dedup check below
+            // (get_meta + early return) relies on them persisting to avoid issuing a
+            // duplicate PayPal invoice when this runs again (repeat IPN / status change).
             self::cardcom_log($log_title, "Payment has been received from " . $order->get_payment_method());
             if (strpos($order->get_payment_method(), 'paypal') !== false) {
                 //PayPal Case
@@ -672,10 +696,15 @@ function woocommerce_cardcom_init()
             self::cardcom_log($log_title, "================== START ==================");
             self::cardcom_log($log_title, "Order Id : " . $order_id);
             $order->add_order_note(__("Capture Charge: charging", 'cardcom'));
-            // Check that the order was paid via Cardcom gateway and NOT ANOTHER
-            if ($order->get_payment_method() == $this->id) {
+            // Identify a Cardcom Capture-Charge order by the 'cardcom_charge_captured' flag, which is
+            // written ONLY by Cardcom's own op-6 checkout flow (IsLowProfileCodeDealOneOK / process_payment).
+            // Do NOT gate on get_payment_method() here: the order's stored _payment_method can be blank or a
+            // display title (e.g. after a bulk import/edit via WP All Import / WP Sheet Editor), which used to
+            // divert genuine Cardcom orders to the "not paid via Cardcom" branch -- skipping the charge while
+            // WooCommerce still moved the order to completed (completed-but-uncharged).
+            $captured = $order->get_meta('cardcom_charge_captured');
+            if (self::IsStringSet($captured)) {
                 // Get meta data about the order (i.e. metadata that only is contained in Cardcom orders)
-                $captured = $order->get_meta('cardcom_charge_captured');
                 /**
                  * === Capture Charge if ===
                  * - There's a charge Id
@@ -764,7 +793,10 @@ function woocommerce_cardcom_init()
                     }
                 }
             } else {
-                $order->add_order_note(__("Order was not payed via Cardcom payment gateway", 'cardcom'));
+                // No Cardcom capture flag on this order -> nothing to capture. order_capture_payment() is
+                // only invoked from the completed/processing handlers, which already require the flag, so
+                // this branch is effectively unreachable; log it rather than mislead with an order note.
+                self::cardcom_log($log_title, "No Capture-Charge flag on order " . $order_id . " - nothing to capture.");
             }
             $order->save();
         }
@@ -1606,10 +1638,15 @@ function woocommerce_cardcom_init()
             $firstName = substr(strip_tags(preg_replace("/&#\d*;/", " ", $order->get_billing_first_name())), 0, 200);
             $email = $order->get_billing_email();
             $params = array();
-            wc_delete_order_item_meta((int)$order_id, 'CardcomInternalDealNumber');
-            wc_delete_order_item_meta((int)$order_id, 'IsIpnRecieved');
-            wc_delete_order_item_meta((int)$order_id, 'InvoiceNumber');
-            wc_delete_order_item_meta((int)$order_id, 'InvoiceType');
+            // Reset order-level Cardcom flags before re-initiating the deal.
+            // These are order meta (written via $order->update_meta_data), so clear
+            // them through order CRUD -- wc_delete_order_item_meta() targets order
+            // line-item meta by item id and would never clear them (HPOS or not).
+            $order->delete_meta_data('CardcomInternalDealNumber');
+            $order->delete_meta_data('IsIpnRecieved');
+            $order->delete_meta_data('InvoiceNumber');
+            $order->delete_meta_data('InvoiceType');
+            $order->save();
             $params = self::initInvoice($order_id); if ($this->operationToPerform == '3') { foreach (array_keys($params) as $k) { if (strpos($k, 'Invoice') === 0) unset($params[$k]); } }
 
             $params["APILevel"] = "9";
@@ -1619,18 +1656,22 @@ function woocommerce_cardcom_init()
             $params['CustomFields.Field25'] = 'WooCommerce Deal ' . "order_id : " . $order_id;
             // https://github.com/UnifiedPaymentSolutions/woocommerce-payment-gateway-everypay/blob/master/includes/class-wc-gateway-everypay.php
             // Redirect
+            // Carry the per-order key (a WooCommerce-issued secret) on every callback URL.
+            // check_ipn_response() validates it before acting, so unauthenticated callers
+            // cannot drive state transitions for orders they don't own (CVE-2025-57976).
+            $order_key_param = '&key=' . rawurlencode($order->get_order_key());
             if (strpos(home_url(), '?') !== false) {
 
-                $params["ErrorRedirectUrl"] = untrailingslashit(home_url()) . '&wc-api=WC_Gateway_Cardcom&' . ('cardcomListener=cardcom_failed&order_id=' . $order_id);
-                $params["IndicatorUrl"] = untrailingslashit(home_url()) . '&wc-api=WC_Gateway_Cardcom&' . ('cardcomListener=cardcom_IPN&order_id=' . $order_id);
-                $params["SuccessRedirectUrl"] = untrailingslashit(home_url()) . '&wc-api=WC_Gateway_Cardcom&' . ('cardcomListener=cardcom_successful&order_id=' . $order_id);
-                $params["CancelUrl"] = untrailingslashit(home_url()) . '&wc-api=WC_Gateway_Cardcom&' . ('cardcomListener=cardcom_cancel&order_id=' . $order_id);
+                $params["ErrorRedirectUrl"] = untrailingslashit(home_url()) . '&wc-api=WC_Gateway_Cardcom&' . ('cardcomListener=cardcom_failed&order_id=' . $order_id) . $order_key_param;
+                $params["IndicatorUrl"] = untrailingslashit(home_url()) . '&wc-api=WC_Gateway_Cardcom&' . ('cardcomListener=cardcom_IPN&order_id=' . $order_id) . $order_key_param;
+                $params["SuccessRedirectUrl"] = untrailingslashit(home_url()) . '&wc-api=WC_Gateway_Cardcom&' . ('cardcomListener=cardcom_successful&order_id=' . $order_id) . $order_key_param;
+                $params["CancelUrl"] = untrailingslashit(home_url()) . '&wc-api=WC_Gateway_Cardcom&' . ('cardcomListener=cardcom_cancel&order_id=' . $order_id) . $order_key_param;
 
             } else {
-                $params["ErrorRedirectUrl"] = untrailingslashit(home_url()) . '?wc-api=WC_Gateway_Cardcom&' . ('cardcomListener=cardcom_failed&order_id=' . $order_id);
-                $params["IndicatorUrl"] = untrailingslashit(home_url()) . '?wc-api=WC_Gateway_Cardcom&' . ('cardcomListener=cardcom_IPN&order_id=' . $order_id);
-                $params["SuccessRedirectUrl"] = untrailingslashit(home_url()) . '?wc-api=WC_Gateway_Cardcom&' . ('cardcomListener=cardcom_successful&order_id=' . $order_id);
-                $params["CancelUrl"] = untrailingslashit(home_url()) . '?wc-api=WC_Gateway_Cardcom&' . ('cardcomListener=cardcom_cancel&order_id=' . $order_id);
+                $params["ErrorRedirectUrl"] = untrailingslashit(home_url()) . '?wc-api=WC_Gateway_Cardcom&' . ('cardcomListener=cardcom_failed&order_id=' . $order_id) . $order_key_param;
+                $params["IndicatorUrl"] = untrailingslashit(home_url()) . '?wc-api=WC_Gateway_Cardcom&' . ('cardcomListener=cardcom_IPN&order_id=' . $order_id) . $order_key_param;
+                $params["SuccessRedirectUrl"] = untrailingslashit(home_url()) . '?wc-api=WC_Gateway_Cardcom&' . ('cardcomListener=cardcom_successful&order_id=' . $order_id) . $order_key_param;
+                $params["CancelUrl"] = untrailingslashit(home_url()) . '?wc-api=WC_Gateway_Cardcom&' . ('cardcomListener=cardcom_cancel&order_id=' . $order_id) . $order_key_param;
             }
             $params["CancelType"] = "2";
             $params["ProductName"] = "Order Id:" . $order_id;
@@ -1778,10 +1819,74 @@ function woocommerce_cardcom_init()
             echo $this->generate_cardcom_form($order);
         }
 
+        /**
+         * Authenticate an incoming Cardcom listener request against the order it targets.
+         *
+         * The listener endpoint (woocommerce_api_wc_gateway_cardcom) is unauthenticated by
+         * design, so the request must prove it relates to the order it claims to act on.
+         * Every callback URL we hand to Cardcom carries the order's key (a per-order secret
+         * issued by WooCommerce); we require that key here. Without it, an unauthenticated
+         * caller could drive state transitions on arbitrary orders (CVE-2025-57976,
+         * Broken Access Control / CWE-862).
+         *
+         * Rollout note (TEMPORARY -- see CARDCOM_KEY_GRACE_UNTIL, remove in the next release):
+         * deals created by pre-fix code have no key on their callback URLs at all. Until the
+         * fixed CARDCOM_KEY_GRACE_UNTIL cutover, a missing key is accepted so in-flight checkouts
+         * don't get stranded when this update lands. A key that IS present but wrong is ALWAYS
+         * rejected, regardless of the grace period -- only a missing key gets any leniency, and
+         * only until the cutover.
+         *
+         * @return bool True when the request carries the correct order key for its order_id,
+         *              or carries no key at all before the CARDCOM_KEY_GRACE_UNTIL cutover.
+         */
+        function cardcom_is_valid_listener_request()
+        {
+            $order_id  = isset($_REQUEST['order_id']) ? absint($_REQUEST['order_id']) : 0;
+            $order_key = isset($_REQUEST['key']) ? sanitize_text_field( wp_unslash( $_REQUEST['key'] ) ) : '';
+
+            if ( $order_id <= 0 ) {
+                return false;
+            }
+
+            $order = wc_get_order( $order_id );
+            if ( ! $order ) {
+                return false;
+            }
+
+            if ( $order_key === '' ) {
+                // TEMPORARY -- remove this whole branch in the next release, see CARDCOM_KEY_GRACE_UNTIL.
+                if ( time() < strtotime( CARDCOM_KEY_GRACE_UNTIL . ' UTC' ) ) {
+                    self::cardcom_log( 'cardcom_is_valid_listener_request',
+                        'Accepted order ' . $order_id . ' without key -- grace period active until ' . CARDCOM_KEY_GRACE_UNTIL . ' UTC' );
+                    return true;
+                }
+                return false;
+            }
+
+            // hash_equals guards against timing side-channels on the key comparison.
+            return hash_equals( (string) $order->get_order_key(), $order_key );
+        }
+
         function check_ipn_response()
         {
-            $WC_Logger = new WC_Logger();
-            $WC_Logger->add( 'cardcom-log', print_r($_REQUEST,true) );
+            $listener = isset($_GET['cardcomListener']) ? sanitize_text_field( wp_unslash( $_GET['cardcomListener'] ) ) : '';
+
+            // Authorize state-changing callbacks before doing any work (CVE-2025-57976).
+            // cardcom_IPN, cardcom_cancel and cardcom_failed can all mutate order/subscription
+            // state, so they must prove ownership of the target order via its per-order key.
+            // cardcom_successful is intentionally exempt: it only empties the caller's own cart
+            // and redirects (no order mutation), so requiring the key there would turn a paid
+            // shopper's return into a 403 if an intermediary (cache/CDN/security plugin) dropped
+            // the &key param, with no security benefit. The IPN is additionally validated
+            // server-to-server via the lowprofilecode in IsLowProfileCodeDealOneOK.
+            if ( $listener !== 'cardcom_successful' && ! $this->cardcom_is_valid_listener_request() ) {
+                self::cardcom_log( 'check_ipn_response', 'Rejected ' . $listener . ' request: missing or invalid order key' );
+                status_header( 403 );
+                wp_die( esc_html__( 'Invalid request.', 'cardcom' ), '', array( 'response' => 403 ) );
+            }
+
+            // Verbose request dump -- only when Debug Logging is enabled.
+            self::cardcom_log_wc( 'cardcom-log', $_REQUEST );
 
             if (isset($_GET['cardcomListener']) && $_GET['cardcomListener'] == 'cardcom_IPN'):
                 @ob_clean();
@@ -1907,7 +2012,8 @@ function woocommerce_cardcom_init()
             self::cardcom_log($log_title, "LowProfile Code : " . $lowprofilecode);
             self::cardcom_log($log_title, "Order Id : " . $orderid);
 
-            $key_1_value = get_post_meta((int)$orderid, 'IsIpnRecieved', true);
+            $order       = wc_get_order( (int) $orderid );
+            $key_1_value = $order ? $order->get_meta( 'IsIpnRecieved' ) : '';
             if (!empty($key_1_value) && $key_1_value == 'true') {
                 //error_log("Order has been processed: ".$key_1_value);
                 return;
@@ -2149,8 +2255,7 @@ function woocommerce_cardcom_init()
             self::cardcom_log($log_title, "ResponseCode : " . $responseArray['ResponseCode']);
             self::cardcom_log($log_title, "DealResponse : " . $responseArray['DealResponse']);
             self::cardcom_log($log_title, "Response Description : " . $responseArray['Description']);
-            $WC_Logger = new WC_Logger();
-            $WC_Logger->add( 'cardcom-response', print_r($responseArray,true) );
+            self::cardcom_log_wc( 'cardcom-response', $responseArray );
             $this->InternalDealNumberPro = 0;
             $this->DealResponePro = -1;
             if (isset($responseArray['InternalDealNumber'])) {
@@ -2509,8 +2614,7 @@ function woocommerce_cardcom_init()
             $body = wp_remote_retrieve_body($response);
             $responseArray = array();
             parse_str($body, $responseArray);
-            $WC_Logger = new WC_Logger();
-            $WC_Logger->add( 'cardcom-log-2024', print_r($responseArray,true) );
+            self::cardcom_log_wc( 'cardcom-log-2024', $responseArray );
             $this->InternalDealNumberPro = 0;
             
             if( isset( $responseArray['InvoiceResponse_InvoiceNumber'] ) ){
@@ -3459,6 +3563,23 @@ function woocommerce_cardcom_init()
         }
 
         /**
+         * Write a verbose payload to the WooCommerce logs, but only when Debug Logging is on.
+         *
+         * Mirrors cardcom_log()'s gating so the heavy print_r() serialization and the
+         * synchronous WC_Logger disk write are skipped entirely on production sites that
+         * leave Debug Logging off.
+         *
+         * @param string $handle WC_Logger source handle (becomes the log file name).
+         * @param mixed  $data   Payload; serialized with print_r() only when logging is enabled.
+         */
+        static function cardcom_log_wc( $handle, $data )
+        {
+            if ( isset( self::$debug_logging ) && self::$debug_logging === '1' ) {
+                ( new WC_Logger() )->add( $handle, print_r( $data, true ) );
+            }
+        }
+
+        /**
          * @return bool if the operation selected allows for users to pay via saved payment methods (i.e. tokens)
          */
         public function operation_allows_to_pay_via_tokens()
@@ -3551,9 +3672,11 @@ function woocommerce_cardcom_init()
         //endregion
 
         public function add_id_billing_field( $fields ) {
+            // Mandatory only when the admin set the field to "required".
+            $required = ( $this->id_field === 'required' );
             $fields['cardcom_id_number'] = array(
                 'label'    => __( 'Tax / Company ID', 'cardcom' ),
-                'required' => ( $this->id_field === 'required' ),
+                'required' => $required,
                 'class'    => array( 'form-row-wide' ),
                 'priority' => 35,
             );

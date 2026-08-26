@@ -3,9 +3,9 @@ Contributors: Cardcom
 Donate link:
 Tags: woocommerce, payment-gateway, checkout
 Requires at least: 3.3
-Requires PHP: 7.2
+Requires PHP: 7.4
 Tested up to: 6.7.1
-Stable tag: 3.5.0.9
+Stable tag: 3.5.1.0
 License: GPLv2 or later
 License URI: https://secure.cardcom.co.il/Html/agreement/agreement.htm
 
@@ -53,10 +53,10 @@ If you are unsure of the correct settings or configurations for your setup, advi
 
 = Minimum Requirements =
 
-* WordPress 3.9 or later - tested up to 5.9
-* PHP version 5.6 or later - tested up to 7.3.5
+* WordPress 3.9 or later - tested up to 6.7.1
+* PHP version 7.4 or later
 * MySQL version 5.6 or later - tested up to 8.0.16
-* WooCommerce 2.7 or later - tested up to 6.1.1
+* WooCommerce 2.7 or later - tested up to 10.8.1
 
 = Procedure =
 
