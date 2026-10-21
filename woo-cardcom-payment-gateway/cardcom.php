@@ -3,8 +3,8 @@
 Plugin Name: CardCom Payment Gateway
 Plugin URI: https://support.cardcom.solutions/hc/he/articles/360007128393-%D7%97%D7%99%D7%91%D7%95%D7%A8-%D7%94%D7%A1%D7%9C%D7%99%D7%A7%D7%94-%D7%9C%D7%97%D7%A0%D7%95%D7%AA-%D7%95%D7%95%D7%A8%D7%93%D7%A4%D7%A8%D7%A1-Wordpress-Woocommerce-Payment-WOO
 Description: CardCom Payment gateway for Woocommerce
-Version: 3.5.1.0
-Changes: Security fix (CVE-2025-57976) - validate the WooCommerce order key on Cardcom callback requests to block unauthorized order/subscription state changes (temporary grace period for in-flight checkouts until 2026-09-02, see CARDCOM_KEY_GRACE_UNTIL -- remove next release); declared WooCommerce HPOS and Cart/Checkout Blocks compatibility (order meta is now HPOS-safe); null-safe gateway settings.
+Version: 3.5.1.1
+Changes: Security fix (CVE-2025-57976) - the WooCommerce order key is now required on all Cardcom callback requests, including the success redirect (an invalid or missing key on the success redirect empties the cart and sends the visitor to the home page without exposing order data), and the temporary grace period for keyless callbacks has been removed; token charges (checkout token charge, capture charge, subscription renewals) now all treat a Cardcom duplicate-deal response (608) the same way - as an already-completed charge, so the customer is not charged twice and renewals are no longer marked as failed - with an order note to verify the deal in Cardcom.
 Author: CardCom
 Author URI: http://www.cardcom.co.il
 Requires PHP: 7.4
@@ -13,18 +13,6 @@ WC tested up to: 10.8.1
 */
 
 add_action('plugins_loaded', 'woocommerce_cardcom_init', 0);
-
-/**
- * ============================== TEMPORARY -- REMOVE IN THE NEXT RELEASE ==============================
- * Rollout grace period for the CVE-2025-57976 order-key fix (see cardcom_is_valid_listener_request()).
- * Deals created by pre-fix code have no &key= on their callback URLs at all; a fixed cutover date (rather
- * than a per-site rolling window) gives every store the SAME deadline to finish any checkout started
- * before this update, after which a missing key is rejected exactly like a wrong one -- no exceptions.
- * DELETE this constant and the grace-period branch in cardcom_is_valid_listener_request() once this
- * version has been out long enough that no pre-fix deal can still be in flight.
- * =======================================================================================================
- */
-define( 'CARDCOM_KEY_GRACE_UNTIL', '2026-09-02 00:00:00' );
 
 /**
  * Declare compatibility with WooCommerce features.
@@ -84,7 +72,7 @@ function woocommerce_cardcom_init()
         static $IsActivateInvoiceForPaypal;
         static $SendToEmailInvoiceForPaypal;
         static $debug_logging;
-        static $plugin = "WOO-3.5.1.0";
+        static $plugin = "WOO-3.5.1.1";
         static $CardComURL = 'https://secure.cardcom.solutions'; // Production URL
 
         //declaring properties because dynamic properties are no longer supported in PHP 8.2
@@ -737,10 +725,7 @@ function woocommerce_cardcom_init()
                     }
                     self::cardcom_log($log_title, "Unique Asmachta : " . $UniqAsmachta);
                     $body['TokenToCharge.UniqAsmachta'] = $UniqAsmachta;
-                    if (self::string_is_set($order->get_transaction_id()) === false) {
-                        // This will get a response of the initial charging
-                        $body['TokenToCharge.UniqAsmachtaReturnOriginal'] = "true";
-                    }
+                    $body['TokenToCharge.UniqAsmachtaReturnOriginal'] = "true";
                     $urlencoded = http_build_query($this->senitize($body));
                     $args = array('body' => $urlencoded,
                         'timeout' => '7',
@@ -758,13 +743,20 @@ function woocommerce_cardcom_init()
                         parse_str($wp_body, $exp);
                         $responseCode = self::try_parse_int($exp['ResponseCode']);
                         $responseDescription = $exp['Description'];
-                        if (isset($responseCode) && $responseCode == 0) { // Charging succeeded
-                            $InternalDealNumber = $exp['InternalDealNumber'];
-                            $order->add_order_note(__("Capture Charge - Charging completed successfully", 'cardcom'));
-                        
+                        if (self::is_token_charge_paid($exp)) { // Charging succeeded (608: it already succeeded earlier)
+                            if (self::is_duplicate_deal_response($exp)) {
+                                self::note_duplicate_deal($order, $log_title);
+                            } else {
+                                $order->add_order_note(__("Capture Charge - Charging completed successfully", 'cardcom'));
+                            }
 
-                            $order->add_order_note(__("Deal Number :", 'cardcom') . $InternalDealNumber);
-                            $order->update_meta_data('CardcomInternalDealNumber', $InternalDealNumber);
+                            if (isset($exp['InternalDealNumber'])) {
+                                $InternalDealNumber = $exp['InternalDealNumber'];
+                                $order->add_order_note(__("Deal Number :", 'cardcom') . $InternalDealNumber);
+                                $order->update_meta_data('CardcomInternalDealNumber', $InternalDealNumber);
+                                $order->update_meta_data('Cardcom Payment ID', $InternalDealNumber);
+                                $order->set_transaction_id($InternalDealNumber);
+                            }
 
 							//get the invoice number in J5 capture charge
 							if( isset( $exp['InvoiceResponse_InvoiceNumber'] ) ){
@@ -779,12 +771,7 @@ function woocommerce_cardcom_init()
                             }
 
                             $order->update_meta_data('cardcom_charge_captured', 'yes');
-                            $order->update_meta_data('Cardcom Payment ID', $InternalDealNumber);
-                            $order->set_transaction_id($InternalDealNumber);
                             $order->save();
-                        } else if (isset($responseCode) && $responseCode == 608) { // Prevented charging Cardholder more than once
-                            $order->add_order_note(__("Capture Charge - Prevented charging customer more than once", 'cardcom'));
-                            $order->update_meta_data('cardcom_charge_captured', 'yes');
                         } else { // An error occurred
                             $order->update_status('failed', __("Capture Charge - Charging failed, please check error", 'cardcom'));
                             $order->add_order_note("Error " . $responseCode . ' : ' . $responseDescription);
@@ -1774,6 +1761,45 @@ function woocommerce_cardcom_init()
             return $response;
         }
 
+        /**
+         * True when a parsed ChargeToken.aspx response means the customer has been charged:
+         * either a fresh success (ResponseCode 0) or Cardcom's duplicate-deal guard (608).
+         * All token-charge callers (checkout token charge, capture charge, scheduled renewals)
+         * must use this so they treat both outcomes the same way.
+         */
+        private static function is_token_charge_paid($responseArray)
+        {
+            return isset($responseArray['ResponseCode'])
+                && ($responseArray['ResponseCode'] == '0' || self::is_duplicate_deal_response($responseArray));
+        }
+
+        /**
+         * True when a parsed ChargeToken.aspx response is Cardcom's duplicate-deal guard
+         * (ResponseCode 608) for a reused TokenToCharge.UniqAsmachta. Cardcom records a
+         * UniqAsmachta only for successful deals and looks it up on the same terminal over the
+         * last 6 months, so a 608 means a charge with this exact UniqAsmachta already succeeded
+         * (typically a retry after a lost/timed-out response). Each caller builds its
+         * UniqAsmachta from its own order id, so the earlier charge was for this same order.
+         * UniqAsmachtaReturnOriginal would return the original deal instead, but Cardcom ignores
+         * it when an invoice is created (invoice=1), so in that case no deal number is available.
+         */
+        private static function is_duplicate_deal_response($responseArray)
+        {
+            return isset($responseArray['ResponseCode']) && $responseArray['ResponseCode'] == '608';
+        }
+
+        /**
+         * Logs a 608 duplicate-deal response and adds the standard order note for it.
+         *
+         * @param WC_Order $order
+         * @param string $log_title
+         */
+        private static function note_duplicate_deal($order, $log_title)
+        {
+            self::cardcom_log($log_title, "Cardcom reported 608 (duplicate deal) for order " . $order->get_id() . " - treating as already paid");
+            $order->add_order_note(__("Cardcom reported this charge as already completed (608 - duplicate deal), so the customer was not charged again and the payment is treated as successful. The deal number is not available here; please verify the deal in Cardcom.", 'cardcom'));
+        }
+
         function HandleError($Error, $msg, $info)
         {
             if ($this->adminEmail != '') {
@@ -1827,17 +1853,9 @@ function woocommerce_cardcom_init()
          * Every callback URL we hand to Cardcom carries the order's key (a per-order secret
          * issued by WooCommerce); we require that key here. Without it, an unauthenticated
          * caller could drive state transitions on arbitrary orders (CVE-2025-57976,
-         * Broken Access Control / CWE-862).
+         * Broken Access Control / CWE-862). A missing key is rejected exactly like a wrong one.
          *
-         * Rollout note (TEMPORARY -- see CARDCOM_KEY_GRACE_UNTIL, remove in the next release):
-         * deals created by pre-fix code have no key on their callback URLs at all. Until the
-         * fixed CARDCOM_KEY_GRACE_UNTIL cutover, a missing key is accepted so in-flight checkouts
-         * don't get stranded when this update lands. A key that IS present but wrong is ALWAYS
-         * rejected, regardless of the grace period -- only a missing key gets any leniency, and
-         * only until the cutover.
-         *
-         * @return bool True when the request carries the correct order key for its order_id,
-         *              or carries no key at all before the CARDCOM_KEY_GRACE_UNTIL cutover.
+         * @return bool True when the request carries the correct order key for its order_id.
          */
         function cardcom_is_valid_listener_request()
         {
@@ -1854,12 +1872,6 @@ function woocommerce_cardcom_init()
             }
 
             if ( $order_key === '' ) {
-                // TEMPORARY -- remove this whole branch in the next release, see CARDCOM_KEY_GRACE_UNTIL.
-                if ( time() < strtotime( CARDCOM_KEY_GRACE_UNTIL . ' UTC' ) ) {
-                    self::cardcom_log( 'cardcom_is_valid_listener_request',
-                        'Accepted order ' . $order_id . ' without key -- grace period active until ' . CARDCOM_KEY_GRACE_UNTIL . ' UTC' );
-                    return true;
-                }
                 return false;
             }
 
@@ -1871,16 +1883,30 @@ function woocommerce_cardcom_init()
         {
             $listener = isset($_GET['cardcomListener']) ? sanitize_text_field( wp_unslash( $_GET['cardcomListener'] ) ) : '';
 
-            // Authorize state-changing callbacks before doing any work (CVE-2025-57976).
-            // cardcom_IPN, cardcom_cancel and cardcom_failed can all mutate order/subscription
-            // state, so they must prove ownership of the target order via its per-order key.
-            // cardcom_successful is intentionally exempt: it only empties the caller's own cart
-            // and redirects (no order mutation), so requiring the key there would turn a paid
-            // shopper's return into a 403 if an intermediary (cache/CDN/security plugin) dropped
-            // the &key param, with no security benefit. The IPN is additionally validated
+            // Authorize every callback before doing any work (CVE-2025-57976): each must prove
+            // ownership of the target order via its per-order key. cardcom_IPN, cardcom_cancel and
+            // cardcom_failed can mutate order/subscription state. cardcom_successful redirects to
+            // the order-received URL, which itself carries the order key -- left unchecked it would
+            // hand that key to anyone who supplies an order_id. The IPN is additionally validated
             // server-to-server via the lowprofilecode in IsLowProfileCodeDealOneOK.
-            if ( $listener !== 'cardcom_successful' && ! $this->cardcom_is_valid_listener_request() ) {
+            if ( ! $this->cardcom_is_valid_listener_request() ) {
                 self::cardcom_log( 'check_ipn_response', 'Rejected ' . $listener . ' request: missing or invalid order key' );
+                if ( $listener === 'cardcom_successful' ) {
+                    // Soft-fail: a real shopper whose &key was dropped by a cache/CDN/security plugin
+                    // still lands somewhere sensible, without exposing any order data. Empty the cart
+                    // as successful_request() would, so they don't pay for the same items twice.
+                    // This only touches the caller's own session cart.
+                    if ( WC()->cart ) {
+                        WC()->cart->empty_cart();
+                    }
+                    $redirectTo = home_url( '/' );
+                    if ( $this->UseIframe == 1 ) {
+                        echo '<script>window.top.location.href = ' . wp_json_encode( $redirectTo ) . ';</script>';
+                    } else {
+                        wp_safe_redirect( $redirectTo );
+                    }
+                    exit();
+                }
                 status_header( 403 );
                 wp_die( esc_html__( 'Invalid request.', 'cardcom' ), '', array( 'response' => 403 ) );
             }
@@ -2595,6 +2621,7 @@ function woocommerce_cardcom_init()
             }
             self::cardcom_log($log_title, "Unique Asmachta : " . $UniqAsmachta);
             $params['TokenToCharge.UniqAsmachta'] = $UniqAsmachta;
+            $params['TokenToCharge.UniqAsmachtaReturnOriginal'] = "true";
             $params['TokenToCharge.CVV2'] = $cvv;
             $params['TokenToCharge.NumOfPayments'] = $numOfPayments === null ? '1' : $numOfPayments;
             $params['CustomeFields.Field25'] = "order_id : " . $order_id . ' ' . "Token Charge";
@@ -2633,8 +2660,11 @@ function woocommerce_cardcom_init()
             // ================================== //
             // ==== Direct charge SUCCEEDED ===== //
             // ================================== //
-            if (isset($respCode) && ($respCode == '0' || $respCode == '608')) {
+            if (self::is_token_charge_paid($responseArray)) {
                 self::cardcom_log($log_title, "SUCCEEDED with response " . $respCode);
+                if (self::is_duplicate_deal_response($responseArray)) {
+                    self::note_duplicate_deal($order, $log_title);
+                }
                 // Todo: I have no idea what's the point of saving on the class the Internal-Deal Number
                 if (isset($responseArray['InternalDealNumber'])) {
                     $this->InternalDealNumberPro = $responseArray['InternalDealNumber'];
@@ -3108,6 +3138,9 @@ function woocommerce_cardcom_init()
                     $UniqAsmachta = substr($UniqAsmachta, 0, 50);
                 }
                 $request['TokenToCharge.UniqAsmachta'] = $UniqAsmachta;
+                // Ignored by Cardcom when an invoice is created (invoice=1) -- it answers 608 instead,
+                // which is_token_charge_paid() below also treats as paid.
+                $request['TokenToCharge.UniqAsmachtaReturnOriginal'] = "true";
                 $request['CustomeFields.Field1'] = 'Scheduled payment Deal';
                 $request['CustomeFields.Field2'] = "renewal_order_id:" . $renewal_order_id;
                 $request['CustomeFields.Field3'] = "renewal_total:" . $renewal_total;
@@ -3143,9 +3176,11 @@ function woocommerce_cardcom_init()
                 $renewal_order->add_order_note(__("Cardcom internal deal number ", 'cardcom') . $cardcom_internal_deal_number);
                 $renewal_order->add_meta_data("cardcom_internal_deal_number", $cardcom_internal_deal_number);
                 $renewal_order->save_meta_data();
-                $isSuccess = isset($respCode) && ($respCode === '0');
-                if ($isSuccess) {
+                if (self::is_token_charge_paid($responseArray)) {
                     self::cardcom_log($log_title, "Deal Succeed with: " . $renewal_order_id);
+                    if (self::is_duplicate_deal_response($responseArray)) {
+                        self::note_duplicate_deal($renewal_order, $log_title);
+                    }
                     $renewal_order->add_order_note($msg_prefix . __("Scheduled payment for Renewal Order", "cardcom")
                         . " # " . $renewal_order_id . " ✅ " . $payment_date_time);
                     $renewal_order->payment_complete();
@@ -3170,6 +3205,10 @@ function woocommerce_cardcom_init()
          * This is not ideal since need we an action that invokes scheduled subscription payment ONLY related
          * To Cardcom's payment gateway. That action hook is "woocommerce_scheduled_subscription_payment_{gateway_id}"
          * was attached with the method "scheduled_subscription_payment_gateway_specific".
+         *
+         * DEAD CODE: this method is never invoked. Its add_action is commented out in the constructor and it
+         * returns immediately below; renewals are handled by cardcom_scheduled_subscription_payment().
+         * Do not apply fixes here -- apply them to cardcom_scheduled_subscription_payment() instead.
          *
          * @param $subscription_id integer
          */
