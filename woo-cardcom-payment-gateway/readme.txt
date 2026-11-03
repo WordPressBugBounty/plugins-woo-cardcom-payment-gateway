@@ -2,10 +2,10 @@
 Contributors: Cardcom
 Donate link:
 Tags: woocommerce, payment-gateway, checkout
-Requires at least: 3.3
-Requires PHP: 7.4
-Tested up to: 6.7.1
-Stable tag: 3.5.1.1
+Requires at least: 7.0
+Requires PHP: 8.2
+Tested up to: 7.1
+Stable tag: 3.6.0.0
 License: GPLv2 or later
 License URI: https://secure.cardcom.co.il/Html/agreement/agreement.htm
 
@@ -53,10 +53,8 @@ If you are unsure of the correct settings or configurations for your setup, advi
 
 = Minimum Requirements =
 
-* WordPress 3.9 or later - tested up to 6.7.1
-* PHP version 7.4 or later
+* WordPress, PHP and WooCommerce versions: see "Requires at least", "Requires PHP" and "Tested up to" at the top of this page.
 * MySQL version 5.6 or later - tested up to 8.0.16
-* WooCommerce 2.7 or later - tested up to 10.8.1
 
 = Procedure =
 
@@ -131,8 +129,20 @@ Please advise [relevant support article](https://support.cardcom.solutions/hc/he
 
 == Changelog ==
 
+= 3.6.0.0 =
+* Security hardening: saved cards can only be used by their logged-in owner; payment results are verified against the order (payment page, operation, amount, currency) before an order is marked paid; subscription card changes require the subscription owner.
+* Sensitive data (tokens, ID numbers, e-mail, order keys) is no longer written to logs or error e-mails.
+* New minimum requirements: PHP 8.2, WordPress 7.0, WooCommerce 11.1. Admin notices warn about unpatched PHP, WordPress or WooCommerce versions.
+* Optional setting to send the API password with token charges.
+* Renewal orders now store their Cardcom deal and document numbers, so the Cardcom refund and cancel-document order actions work on renewals (including renewals charged by earlier versions).
+* Fix: Capture Charge (operation 6) no longer saves an empty token from a failed first card attempt, so the later capture uses the card that was actually approved. A capture with no stored token now fails with an order note instead of being sent.
+* Fix: changing the card on a WooCommerce subscription now keeps it a subscription on sites with HPOS and a persistent object cache, takes it off manual renewal, and charges future renewals to the new card.
+
 Please advise the [plugin development log](https://plugins.trac.wordpress.org/log/woo-cardcom-payment-gateway/) for changes.
 
 == Upgrade notice ==
+
+= 3.6.0.0 =
+Security release. Requires PHP 8.2, WordPress 7.0 and WooCommerce 11.1 or newer. Fixes Capture Charge and subscription card-change issues.
 
 Please advise the [plugin development log](https://plugins.trac.wordpress.org/log/woo-cardcom-payment-gateway/) for changes.

@@ -3,16 +3,121 @@
 Plugin Name: CardCom Payment Gateway
 Plugin URI: https://support.cardcom.solutions/hc/he/articles/360007128393-%D7%97%D7%99%D7%91%D7%95%D7%A8-%D7%94%D7%A1%D7%9C%D7%99%D7%A7%D7%94-%D7%9C%D7%97%D7%A0%D7%95%D7%AA-%D7%95%D7%95%D7%A8%D7%93%D7%A4%D7%A8%D7%A1-Wordpress-Woocommerce-Payment-WOO
 Description: CardCom Payment gateway for Woocommerce
-Version: 3.5.1.1
-Changes: Security fix (CVE-2025-57976) - the WooCommerce order key is now required on all Cardcom callback requests, including the success redirect (an invalid or missing key on the success redirect empties the cart and sends the visitor to the home page without exposing order data), and the temporary grace period for keyless callbacks has been removed; token charges (checkout token charge, capture charge, subscription renewals) now all treat a Cardcom duplicate-deal response (608) the same way - as an already-completed charge, so the customer is not charged twice and renewals are no longer marked as failed - with an order note to verify the deal in Cardcom.
+Version: 3.6.0.0
+Changes: Security hardening release - saved cards only usable by their logged-in owner; payment results verified against the order (payment page, operation, amount, currency); subscription card changes require the owner; secrets removed from logs and e-mails; IPN processing serialised; new minimums PHP 8.2, WordPress 7.0, WooCommerce 11.1 with admin advisories for unpatched versions. Bug fixes: Capture Charge no longer stores an empty token from a failed first attempt (7577); changing the card on a subscription keeps it a subscription under HPOS/object cache, takes it off manual renewal and charges renewals to the new card (7610). Renewal orders store their deal and document numbers so the Cardcom refund/cancel actions work on them.
 Author: CardCom
 Author URI: http://www.cardcom.co.il
-Requires PHP: 7.4
+Requires at least: 7.0
+Requires PHP: 8.2
 Requires Plugins: woocommerce
-WC tested up to: 10.8.1
+WC requires at least: 11.1
+WC tested up to: 11.2
 */
 
+defined('ABSPATH') || exit;
+
 add_action('plugins_loaded', 'woocommerce_cardcom_init', 0);
+
+/**
+ * Lowest patched release per PHP branch / WordPress / WooCommerce, for the admin advisory notice.
+ * PHP: PHP2Shell CVE-2026-109618 / CVE-2026-109619 (2026-10-21, CISA KEV).
+ * WordPress (per branch): wp2shell CVE-2026-63030 / CVE-2026-60137 (7.0.2), CVE-2026-65640 (7.0.4),
+ *   CVE-2026-87902 (7.1.2 / 7.0.6, 2026-09-22).
+ * WooCommerce: CVE-2026-48888 (11.1.0), CVE-2026-106608 (11.2.0).
+ */
+const CARDCOM_PATCHED_VERSIONS = array(
+    'php' => array('8.2' => '8.2.35', '8.3' => '8.3.36', '8.4' => '8.4.27', '8.5' => '8.5.12'),
+    'wp'  => array('7.0' => '7.0.6', '7.1' => '7.1.2'),
+    'wc'  => '11.2.0',
+);
+/** Supported floors (also in the plugin header). */
+const CARDCOM_MIN_VERSIONS = array('php' => '8.2', 'wp' => '7.0', 'wc' => '11.1');
+
+/**
+ * Requirements this site does not meet. Warning only: the gateway keeps working.
+ *
+ * @return string[]
+ */
+function cardcom_environment_problems()
+{
+    $problems = array();
+    if (version_compare(PHP_VERSION, CARDCOM_MIN_VERSIONS['php'], '<')) {
+        $problems[] = sprintf('PHP %s or newer is required (this site runs %s).', CARDCOM_MIN_VERSIONS['php'], PHP_VERSION);
+    }
+    $wp = get_bloginfo('version');
+    if (version_compare($wp, CARDCOM_MIN_VERSIONS['wp'], '<')) {
+        $problems[] = sprintf('WordPress %s or newer is required (this site runs %s).', CARDCOM_MIN_VERSIONS['wp'], $wp);
+    }
+    if (defined('WC_VERSION') && version_compare(WC_VERSION, CARDCOM_MIN_VERSIONS['wc'], '<')) {
+        $problems[] = sprintf('WooCommerce %s or newer is required (this site runs %s).', CARDCOM_MIN_VERSIONS['wc'], WC_VERSION);
+    }
+    return $problems;
+}
+
+/** @return bool */
+function cardcom_environment_ok()
+{
+    return cardcom_environment_problems() === array();
+}
+
+/**
+ * Security advisories for unpatched platform versions.
+ *
+ * @param string|null $php defaults to PHP_VERSION
+ * @param string|null $wp  defaults to the running WordPress version
+ * @param string|null $wc  defaults to WC_VERSION
+ * @return string[]
+ */
+function cardcom_platform_advisories($php = null, $wp = null, $wc = null)
+{
+    $php = $php === null ? PHP_VERSION : $php;
+    $wp = $wp === null ? get_bloginfo('version') : $wp;
+    $wc = $wc === null ? (defined('WC_VERSION') ? WC_VERSION : '') : $wc;
+    $out = array();
+    $branch = implode('.', array_slice(explode('.', $php), 0, 2));
+    $php_patched = CARDCOM_PATCHED_VERSIONS['php'];
+    if (isset($php_patched[$branch])) {
+        if (version_compare($php, $php_patched[$branch], '<')) {
+            $out[] = sprintf('PHP %s has critical remote code execution vulnerabilities (CVE-2026-109618, CVE-2026-109619). Ask your host to update to PHP %s or newer.', $php, $php_patched[$branch]);
+        }
+    } elseif (version_compare($branch, '8.2', '<')) {
+        $out[] = sprintf('PHP %s no longer receives security fixes. Ask your host to move to PHP 8.2 or newer (8.3 or newer recommended).', $php);
+    }
+    if ($wp !== '') {
+        $wp_patched = CARDCOM_PATCHED_VERSIONS['wp'];
+        $wp_branch = implode('.', array_slice(explode('.', preg_replace('/[^0-9.].*$/', '', $wp)), 0, 2));
+        $wp_target = null;
+        if (isset($wp_patched[$wp_branch])) {
+            $wp_target = version_compare($wp, $wp_patched[$wp_branch], '<') ? $wp_patched[$wp_branch] : null;
+        } elseif (version_compare($wp_branch, (string)array_key_first($wp_patched), '<')) {
+            $wp_target = end($wp_patched); // branch older than any we track: newest fix
+        }
+        if ($wp_target !== null) {
+            $out[] = sprintf('WordPress %s is affected by critical security vulnerabilities. Update WordPress to %s or newer.', $wp, $wp_target);
+        }
+    }
+    if ($wc !== '' && version_compare($wc, CARDCOM_PATCHED_VERSIONS['wc'], '<')) {
+        $out[] = sprintf('WooCommerce %s has known security issues. Update WooCommerce to %s or newer.', $wc, CARDCOM_PATCHED_VERSIONS['wc']);
+    }
+    return $out;
+}
+
+/** Admin notice for unmet requirements and platform advisories (shop managers only). */
+function cardcom_environment_notice()
+{
+    if (!current_user_can('manage_woocommerce')) {
+        return;
+    }
+    $lines = array_unique(array_merge(cardcom_environment_problems(), cardcom_platform_advisories()));
+    if (!$lines) {
+        return;
+    }
+    echo '<div class="notice notice-error"><p><strong>' . esc_html__('CardCom Payment Gateway', 'cardcom') . '</strong></p><ul>';
+    foreach ($lines as $line) {
+        echo '<li>' . esc_html($line) . '</li>';
+    }
+    echo '</ul></div>';
+}
 
 /**
  * Declare compatibility with WooCommerce features.
@@ -46,6 +151,7 @@ function woocommerce_cardcom_init()
     if (!class_exists('WC_Payment_Gateway')) {
         return;
     }
+    add_action('admin_notices', 'cardcom_environment_notice');
 
     DEFINE('PLUGIN_DIRECTORY', plugins_url(basename(plugin_dir_path(__FILE__)), basename(__FILE__)) . '/');
 
@@ -65,6 +171,7 @@ function woocommerce_cardcom_init()
         static $must_cvv;
         static $user;
         static $api_password;
+        static $send_api_password;
         static $CoinID;
         static $sendByEmail;
         static $language;
@@ -72,7 +179,7 @@ function woocommerce_cardcom_init()
         static $IsActivateInvoiceForPaypal;
         static $SendToEmailInvoiceForPaypal;
         static $debug_logging;
-        static $plugin = "WOO-3.5.1.1";
+        static $plugin = "WOO-3.6.0.0";
         static $CardComURL = 'https://secure.cardcom.solutions'; // Production URL
 
         //declaring properties because dynamic properties are no longer supported in PHP 8.2
@@ -88,6 +195,7 @@ function woocommerce_cardcom_init()
         public string $successUrl;
         public string $InvoiceVATFREE;
         public string $id_field;
+        public string $last_lowprofile_error = '';
 
         function __construct( $args = [])
         {
@@ -162,6 +270,7 @@ function woocommerce_cardcom_init()
             self::$must_cvv = $this->settings['must_cvv'];
             self::$user = $this->settings['username'];
             self::$api_password = isset( $this->settings['apipass'] ) ? $this->settings['apipass'] : '';
+            self::$send_api_password = isset( $this->settings['send_api_password'] ) ? $this->settings['send_api_password'] : '0';
             self::$CoinID = $this->settings['currency'];
             if (isset($this->settings['SendByEmail'])) {
                 self::$sendByEmail = $this->settings['SendByEmail'];
@@ -281,6 +390,7 @@ function woocommerce_cardcom_init()
             add_action('valid-paypal-standard-ipn-request', array(get_called_class(), 'ValidatePaypalRequest')); // For "PayPal Standard" gateway
             //  add_action( 'woocommerce_paypal_express_checkout_valid_ipn_request', array(get_called_class(), 'CreateinvoiceForPayPal' ) ); // For "Paypal Express Checkout"
             add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), [ get_called_class(), 'plugin_action_links' ] );
+            add_filter( 'is_protected_meta', array( get_called_class(), 'protect_cardcom_meta' ), 10, 3 );
 
 
         }
@@ -329,10 +439,10 @@ function woocommerce_cardcom_init()
                 
                 $urlencoded = http_build_query($bodyArray);
 
-                $data = wp_remote_post('https://secure.cardcom.solutions/api/v11/Documents/CancelDoc',array(
+                $data = wp_remote_post(self::$CardComURL . '/api/v11/Documents/CancelDoc',array(
                     'body'    => $urlencoded,
                     'timeout' => '7',
-                    'redirection' => '5',
+                    'redirection' => 0, // never follow redirects with credentials in the body
                     'httpversion' => '1.0',
                     'blocking' => true,
                     'headers' => array(),
@@ -356,12 +466,12 @@ function woocommerce_cardcom_init()
                     
                 }
                 else{
-                    $msg = 'Cardcom Api response='.$cancelledInfo->Description;
+                    $msg = 'Cardcom Api response=' . (is_object($cancelledInfo) && isset($cancelledInfo->Description) ? $cancelledInfo->Description : 'no response');
                     $adminnotice = new WC_Admin_Notices();
-                    $adminnotice->add_custom_notice("cardcom_on_order_status_refunded",$msg);
+                    $adminnotice->add_custom_notice("cardcom_on_order_status_refunded", esc_html($msg));
                     $adminnotice->output_custom_notices();
 
-                    $order->add_order_note(__($msg, 'cardcom'));
+                    $order->add_order_note(esc_html($msg));
                 }
             }
             else{
@@ -372,7 +482,7 @@ function woocommerce_cardcom_init()
                 $adminnotice->add_custom_notice("cardcom_on_order_status_refunded",$msg);
                 $adminnotice->output_custom_notices();        
 
-                $order->add_order_note(__($msg, 'cardcom'));        
+                $order->add_order_note($msg);        
             }
 
         }
@@ -394,7 +504,12 @@ function woocommerce_cardcom_init()
             self::cardcom_log($log_title, "================== START ==================");
             self::cardcom_log($log_title, "Order Id : " . $order->get_id());
             $transaction_id = $order->get_meta( 'CardcomInternalDealNumber' );
-            
+            if ( empty( $transaction_id ) ) {
+                // Renewal orders charged before 3.6.0.0 kept the deal number under this key only.
+                $legacy = (string) $order->get_meta( 'cardcom_internal_deal_number' );
+                $transaction_id = ctype_digit( $legacy ) && (int) $legacy > 0 ? $legacy : '';
+            }
+
             if( !empty($transaction_id) ){
                 $bodyArray = [
                     "ApiName"        => self::$user,
@@ -406,10 +521,10 @@ function woocommerce_cardcom_init()
                 
                 $urlencoded = http_build_query($bodyArray);
 
-                $data = wp_remote_post('https://secure.cardcom.solutions/api/v11/Transactions/RefundByTranzactionId',array(
+                $data = wp_remote_post(self::$CardComURL . '/api/v11/Transactions/RefundByTranzactionId',array(
                     'body'    => $urlencoded,
                     'timeout' => '7',
-                    'redirection' => '5',
+                    'redirection' => 0, // never follow redirects with credentials in the body
                     'httpversion' => '1.0',
                     'blocking' => true,
                     'headers' => array(),
@@ -436,12 +551,12 @@ function woocommerce_cardcom_init()
                 }
                 else{
                     
-                    $msg = 'Cardcom Api response='.$cancelledInfo->Description;
+                    $msg = 'Cardcom Api response=' . (is_object($cancelledInfo) && isset($cancelledInfo->Description) ? $cancelledInfo->Description : 'no response');
                     $adminnotice = new WC_Admin_Notices();
-                    $adminnotice->add_custom_notice("cardcom_on_order_status_cancelled",$msg);
+                    $adminnotice->add_custom_notice("cardcom_on_order_status_cancelled", esc_html($msg));
                     $adminnotice->output_custom_notices();
 
-                    $order->add_order_note(__($msg, 'cardcom'));
+                    $order->add_order_note(esc_html($msg));
                 }
             }
             else{
@@ -451,7 +566,7 @@ function woocommerce_cardcom_init()
                 $adminnotice->add_custom_notice("cardcom_on_order_status_cancelled",$msg);
                 $adminnotice->output_custom_notices();        
 
-                $order->add_order_note(__($msg, 'cardcom'));
+                $order->add_order_note($msg);
 
             }
 
@@ -498,7 +613,7 @@ function woocommerce_cardcom_init()
                 }
             } else { // Log a case where we could not find the order object
                 self::cardcom_log($title_log, "Could not find the order with the value 'custom' in posted object");
-                if (isset($posted['custom'])) self::cardcom_log($title_log, "The 'custom' value ::: " . $posted['custom']);
+                if (isset($posted['custom'])) self::cardcom_log($title_log, "The 'custom' value was present (redacted)");
                 return;
             }
         }
@@ -515,7 +630,7 @@ function woocommerce_cardcom_init()
                 $order_id = $custom->order_id;
                 self::cardcom_log($title_log, "Order Id found : " . $order_id);
                 $order_key = $custom->order_key;
-                self::cardcom_log($title_log, "Order key found : " . $order_key);
+                self::cardcom_log($title_log, "Order key found : " . self::mask_secret($order_key));
             } else {
                 // Nothing was found.
                 self::cardcom_log($title_log, 'Order ID and key were not found in "custom".');
@@ -577,7 +692,7 @@ function woocommerce_cardcom_init()
                 $urlencoded = http_build_query($initParams);
                 $args = array('body' => $urlencoded,
                     'timeout' => '5',
-                    'redirection' => '5',
+                    'redirection' => 0, // never follow redirects with credentials in the body
                     'httpversion' => '1.0',
                     'blocking' => true,
                     'headers' => array(),
@@ -700,6 +815,16 @@ function woocommerce_cardcom_init()
                  * - The "capture" data wasn't already charge
                  */
                 if (self::IsStringSet($captured) && $captured == 'no') {
+                    // Never send an empty token to the server. Orders captured before the
+                    // IsLowProfileCodeDealOneOK fix can hold an empty 'cardcom_token_val' from a
+                    // failed first attempt; fail loudly so the merchant can act instead of
+                    // getting an opaque server error.
+                    $tokenToCharge = $order->get_meta('cardcom_token_val');
+                    if (!self::IsStringSet($tokenToCharge)) {
+                        self::cardcom_log($log_title, "No token stored on order " . $order_id . " - capture not sent");
+                        $order->update_status('failed', __("Capture Charge - No token stored on order, charge not sent", 'cardcom'));
+                        return;
+                    }
                     if ($this->invoice == '1') {
                         $body = self::initInvoice($order->get_id(), self::$cvv_free_trm);
                     } else {
@@ -709,7 +834,7 @@ function woocommerce_cardcom_init()
                     $body['CustomeFields.Field25'] = "order_id:" . $order->get_id();
                     $body['TokenToCharge.APILevel'] = '10';
                     $body["TokenToCharge.SumToBill"] = $body['SumToBill']; // Copy value from "initTerminal"/"initInvoice"
-                    $body['TokenToCharge.Token'] = $order->get_meta('cardcom_token_val');
+                    $body['TokenToCharge.Token'] = $tokenToCharge;
                     $body['TokenToCharge.NumOfPayments'] = $order->get_meta('cardcom_NumOfPayments');
                     $body['TokenToCharge.ApprovalNumber'] = $order->get_meta('cardcom_Approval_Num');
                     $body['TokenToCharge.CardOwnerName'] = $order->get_meta('cardcom_CardOwnerName');
@@ -727,9 +852,10 @@ function woocommerce_cardcom_init()
                     $body['TokenToCharge.UniqAsmachta'] = $UniqAsmachta;
                     $body['TokenToCharge.UniqAsmachtaReturnOriginal'] = "true";
                     $urlencoded = http_build_query($this->senitize($body));
+                    $urlencoded = $this->append_api_password($urlencoded);
                     $args = array('body' => $urlencoded,
                         'timeout' => '7',
-                        'redirection' => '5',
+                        'redirection' => 0, // never follow redirects with credentials in the body
                         'httpversion' => '1.0',
                         'blocking' => true,
                         'headers' => array(),
@@ -879,74 +1005,53 @@ function woocommerce_cardcom_init()
             $TotalLineCost = 0;
             $ItemShipping = $order->get_shipping_total() + $order->get_shipping_tax();
             // ============= Regardless of version: Set Shipping details in invoice ============= //
-            if (version_compare(WOOCOMMERCE_VERSION, '2.7', '<')) {
-                // ------- Set item/products to invoice ------- //
-                foreach ($order->get_items() as $item) {
-                    $ItemTotal = $order->get_item_total($item, false, false) + $order->get_item_tax($item, false, false);
-                    $itemName = substr(strip_tags(preg_replace("/&#\d*;/", " ", $item['name'])), 0, 200);
-                    $params['InvoiceLines' . $AddToString . '.Description'] = $itemName;
-                    $params['InvoiceLines' . $AddToString . '.Price'] = $ItemTotal;
-                    $params['InvoiceLines' . $AddToString . '.Quantity'] = $item['qty'];
-                    $params['InvoiceLines' . $AddToString . '.ProductID'] = $item["product_id"];
-                    $TotalLineCost += ($ItemTotal * $item['qty']);
+            // ------- Set item/products to invoice ------- //
+            foreach ($order->get_items(array('line_item', 'fee')) as $item_id => $item) {
+                $itemName = substr(strip_tags(preg_replace("/&#\d*;/", " ", $item->get_name())), 0, 200);
+                if ('fee' === $item['type']) {
+                    $item_line_total = $item['line_total'];
+                    $TotalLineCost += $item_line_total;
                     $ItemsCount++;
-                    $AddToString = $ItemsCount;
-                }
-                // ------- Set Shipping description (if there is one) ------- //
-                if ($ItemShipping != 0) {
-                    $ShippingDesk = substr(strip_tags(preg_replace("/&#\d*;/", " ", ucwords(self::get_shipping_method_fixed($order)))), 0, 200);
-                }
-                // ------- Set Discount amount total ------- //
-                $order_discount = $order->get_order_discount();
-                $order_discount += $order->get_discount_tax();
-            } else {
-                // ------- Set item/products to invoice ------- //
-                foreach ($order->get_items(array('line_item', 'fee')) as $item_id => $item) {
-                    $itemName = substr(strip_tags(preg_replace("/&#\d*;/", " ", $item->get_name())), 0, 200);
-                    if ('fee' === $item['type']) {
-                        $item_line_total = $item['line_total'];
-                        $TotalLineCost += $item_line_total;
-                        $ItemsCount++;
-                    } else {
-                        $product = $item->get_product();
-                        $item_line_total = number_format($order->get_item_subtotal($item, true), 2, '.', '');
-                        $SKU = '';
-                        try {
-                            if($product) {
-                                $SKU = $product->get_sku();
-                                $product_variation_id = $item['variation_id'];
-                                // Check if product has variation.
-                                if ($product_variation_id) {
-                                    $product = new WC_Product($item['variation_id']);
-                                } else {
-                                    $product = new WC_Product($item['product_id']);
-                                }
-                                $SKU = $product->get_sku();
+                } else {
+                    $product = $item->get_product();
+                    $item_line_total = number_format($order->get_item_subtotal($item, true), 2, '.', '');
+                    $SKU = '';
+                    try {
+                        if($product) {
+                            $SKU = $product->get_sku();
+                            $product_variation_id = $item['variation_id'];
+                            // Check if product has variation.
+                            if ($product_variation_id) {
+                                $product = new WC_Product($item['variation_id']);
+                            } else {
+                                $product = new WC_Product($item['product_id']);
                             }
-                        } catch (Exception $ex) {
-                            error_log('Line 263 get SKU' . $ex->getMessage());
+                            $SKU = $product->get_sku();
                         }
-                        if (self::$InvVATFREE == '3') {
-                            $params['InvoiceLines' . $AddToString . '.IsVatFree'] = (bool)$product->is_taxable() == false ? 'true' : 'false';
-                            $item_line_total = number_format($order->get_item_subtotal($item, $product->is_taxable()), 2, '.', '');
-                        }
-                        $params['InvoiceLines' . $AddToString . '.Quantity'] = $item->get_quantity();
-                        $params['InvoiceLines' . $AddToString . '.ProductID'] = $SKU;
-                        $TotalLineCost += ($item_line_total * $item->get_quantity());
-                        $ItemsCount++;
+                    } catch (Exception $ex) {
+                        error_log('Line 263 get SKU' . $ex->getMessage());
                     }
-                    $params['InvoiceLines' . $AddToString . '.Description'] = $itemName;
-                    $params['InvoiceLines' . $AddToString . '.Price'] = $item_line_total;
-                    $AddToString = $ItemsCount;
+                    if (self::$InvVATFREE == '3') {
+                        $params['InvoiceLines' . $AddToString . '.IsVatFree'] = (bool)$product->is_taxable() == false ? 'true' : 'false';
+                        $item_line_total = number_format($order->get_item_subtotal($item, $product->is_taxable()), 2, '.', '');
+                    }
+                    $params['InvoiceLines' . $AddToString . '.Quantity'] = $item->get_quantity();
+                    $params['InvoiceLines' . $AddToString . '.ProductID'] = $SKU;
+                    $TotalLineCost += ($item_line_total * $item->get_quantity());
+                    $ItemsCount++;
                 }
-                // ------- Set Shipping description (if there is one) ------- //
-                if ($ItemShipping != 0) {
-                    $ShippingDesk = substr(strip_tags(preg_replace("/&#\d*;/", " ", $order->get_shipping_method())), 0, 200);
-                }
-                // ------- Set Discount amount total ------- //
-                $order_discount = $order->get_discount_total();
-                $order_discount += $order->get_discount_tax();
+                $params['InvoiceLines' . $AddToString . '.Description'] = $itemName;
+                $params['InvoiceLines' . $AddToString . '.Price'] = $item_line_total;
+                $AddToString = $ItemsCount;
             }
+            // ------- Set Shipping description (if there is one) ------- //
+            if ($ItemShipping != 0) {
+                $ShippingDesk = substr(strip_tags(preg_replace("/&#\d*;/", " ", $order->get_shipping_method())), 0, 200);
+            }
+            // ------- Set Discount amount total ------- //
+            $order_discount = $order->get_discount_total();
+            $order_discount += $order->get_discount_tax();
+
             // ============= Set Shipping details in invoice ============= //
             if ($ItemShipping != 0) {
                 $params['InvoiceLines' . $AddToString . '.Description'] = $ShippingDesk;
@@ -1131,9 +1236,16 @@ function woocommerce_cardcom_init()
                 ),
                 'apipass' => array(
                     'title' => __('API User Password', 'cardcom'),
-                    'type' => 'text',
+                    'type' => 'password',
                     'description' => __('Required for cancel/refund API to function', 'cardcom'),
                     'default' => ''
+                ),
+                'send_api_password' => array(
+                    'title' => __('Send API password with token charges', 'cardcom'),
+                    'type' => 'select',
+                    'options' => array('0' => 'No', '1' => 'Yes'),
+                    'description' => __('Recommended. Saved-card charges, Capture Charge and subscription renewals will authenticate with the API User Password. Enable only after confirming the password is correct, because a wrong password makes those charges fail.', 'cardcom'),
+                    'default' => '0'
                 ),
                 'maxpayment' => array(
                     'title' => __('Max Payment', 'cardcom'),
@@ -1302,6 +1414,10 @@ function woocommerce_cardcom_init()
             $this->operationToPerform = $this->operation;
             $isPCI = $this->cerPCI === '1';
             $paymentTokenValue = $this->get_post('wc-cardcom-payment-token'); // Selected Saved-Payment-method/Token by user
+            if (!is_user_logged_in()) {
+                // Guests have no saved payment methods; never honour a posted token id for them.
+                $paymentTokenValue = null;
+            }
             $savePaymentMethod = $this->get_post('wc-cardcom-new-payment-method'); // Checkbox if user wishes to save payment method.
             $savePaymentMethod = isset($savePaymentMethod) && $savePaymentMethod === 'true';
             $didUserSelectedSavedToken = isset($paymentTokenValue) && $paymentTokenValue !== 'new';
@@ -1390,45 +1506,47 @@ function woocommerce_cardcom_init()
             if ( ! $subscription ) return;
 
             $log_title = "intercept_change_payment_method";
+            // Only the subscription owner, from the WooCommerce Subscriptions change-payment form, may
+            // start a card change. Without this anyone could attach a card to any subscription.
+            if ( ! $this->can_change_subscription_payment_method( $subscription_id ) ) {
+                self::cardcom_log($log_title, "Rejected payment method change for subscription " . $subscription_id . ": not authorised");
+                return;
+            }
             self::cardcom_log($log_title, "Intercepting POST for subscription: " . $subscription_id);
 
-            // Save the meta flag using direct DB to avoid any type corruption from save()
-            global $wpdb;
-            $meta_table = $wpdb->prefix . 'wc_orders_meta';
-            $wpdb->query( $wpdb->prepare(
-                "INSERT INTO {$meta_table} (order_id, meta_key, meta_value) VALUES (%d, %s, %s)
-                 ON DUPLICATE KEY UPDATE meta_value = %s",
-                $subscription_id, '_cardcom_changing_payment_method', 'yes', 'yes'
-            ) );
+            // Flag the subscription through order CRUD on the proper WC_Subscription object.
+            $subscription->update_meta_data( '_cardcom_changing_payment_method', 'yes' );
+            $subscription->save();
 
-            // Install a temporary guard to prevent type corruption during GetRedirectURL
-            $guard_sub_id = $subscription_id;
-            add_action( 'woocommerce_before_order_object_save', function( $order ) use ( $guard_sub_id, $log_title ) {
-                if ( $order->get_id() == $guard_sub_id && $order->get_type() === 'shop_order' ) {
-                    // Prevent saving  this would corrupt the subscription type
-                    self::cardcom_log($log_title, "GUARD: Blocked shop_order save on subscription " . $guard_sub_id);
-                    // Force the type back (this is an in-memory fix before the save hits the DB)
-                    // Unfortunately we cannot easily change the type on a WC_Order object,
-                    // so we will fix it via DB after the redirect URL is built.
-                }
-            }, 1 );
-
+            // GetRedirectURL loads the subscription via wc_get_order, so it is saved as a subscription.
+            // No direct DB type fix here: it bypassed the object cache and left a stale shop_order copy (bug 7610).
             $originalOperation = $this->operationToPerform;
             $this->operationToPerform = '3';
             $redirect_url = $this->GetRedirectURL( $subscription_id );
             $this->operationToPerform = $originalOperation;
 
-            // SAFETY NET: Force-fix the subscription type in case GetRedirectURL corrupted it
-            $wpdb->update(
-                $wpdb->prefix . 'wc_orders',
-                array( 'type' => 'shop_subscription' ),
-                array( 'id' => $subscription_id )
-            );
-            self::cardcom_log($log_title, "Ensured subscription type is shop_subscription after GetRedirectURL");
-
-            self::cardcom_log($log_title, "Redirecting to Cardcom: " . $redirect_url);
+            self::cardcom_log($log_title, "Redirecting to Cardcom (LowProfile page)");
             wp_redirect( $redirect_url );
             exit();
+        }
+
+        /**
+         * True when the current user owns the subscription and posted a valid
+         * WooCommerce Subscriptions change-payment-method nonce.
+         *
+         * @param int $subscription_id
+         * @return bool
+         */
+        private function can_change_subscription_payment_method( $subscription_id )
+        {
+            if ( ! is_user_logged_in() ) {
+                return false;
+            }
+            if ( ! current_user_can( 'edit_shop_subscription_payment_method', $subscription_id ) ) {
+                return false;
+            }
+            $nonce = isset( $_POST['_wcsnonce'] ) ? sanitize_text_field( wp_unslash( $_POST['_wcsnonce'] ) ) : '';
+            return $nonce !== '' && (bool) wp_verify_nonce( $nonce, 'wcs_change_payment_method' );
         }
 
         /**
@@ -1502,23 +1620,24 @@ function woocommerce_cardcom_init()
         {
             $order_id = $order->get_id();
             if ($this->UseIframe == 1) /* === Open in iframe === */ {
-                if (version_compare(WOOCOMMERCE_VERSION, '2.2', '<')) {
-                    return array(
-                        'result' => 'success',
-                        'redirect' => add_query_arg('order', $order_id, add_query_arg('key', $order->get_order_key(), get_permalink(woocommerce_get_page_id('pay')))));
-                } else {
-                    $arr_params = array('order-pay' => $order_id, 'operation' => $this->operationToPerform);
-                                   
-                    return array(
-                        'result' => 'success',
-                        'redirect' => add_query_arg($arr_params, add_query_arg('key', $order->get_order_key(), $order->get_checkout_payment_url(true))));
-                }
-
-            } else /* === Re-direct to LowProfile Page === */ {
-       
+                // The LowProfile operation is resolved server-side in receipt_page(); never carry it in the URL.
+                $arr_params = array('order-pay' => $order_id);
+                               
                 return array(
                     'result' => 'success',
-                    'redirect' => $this->GetRedirectURL($order_id)
+                    'redirect' => add_query_arg($arr_params, add_query_arg('key', $order->get_order_key(), $order->get_checkout_payment_url(true))));
+
+
+            } else /* === Re-direct to LowProfile Page === */ {
+                $this->last_lowprofile_error = '';
+                $redirect = $this->GetRedirectURL($order_id);
+                if ($this->last_lowprofile_error !== '') {
+                    // 'failure' makes classic and block checkout show the message instead of a silent bounce.
+                    return array('result' => 'failure', 'message' => $this->last_lowprofile_error);
+                }
+                return array(
+                    'result' => 'success',
+                    'redirect' => $redirect
                 );
             }
         }
@@ -1569,11 +1688,8 @@ function woocommerce_cardcom_init()
                 return $currency;
 
             // if woo graeter then 3.0 use get_currency
-            if (version_compare(WOOCOMMERCE_VERSION, '3.0', '<')) {
-                $cur = $order->get_order_currency();
-            } else {
-                $cur = $order->get_currency();
-            }
+            $cur = $order->get_currency();
+
 
             if ($cur == "ILS")
                 return 1;
@@ -1620,7 +1736,12 @@ function woocommerce_cardcom_init()
             // =============================================================== //
             // ======================= Prepare Request ======================= //
             // =============================================================== //
-            $order = new WC_Order($order_id);
+            // wc_get_order returns a WC_Subscription for subscription ids. Saving a subscription through
+            // a plain WC_Order turns it into shop_order under HPOS (bug 7610).
+            $order = wc_get_order($order_id);
+            if (!$order) {
+                $order = new WC_Order($order_id);
+            }
             $lastName = substr(strip_tags(preg_replace("/&#\d*;/", " ", $order->get_billing_last_name())), 0, 200);
             $firstName = substr(strip_tags(preg_replace("/&#\d*;/", " ", $order->get_billing_first_name())), 0, 200);
             $email = $order->get_billing_email();
@@ -1686,6 +1807,9 @@ function woocommerce_cardcom_init()
             }
             self::cardcom_log($log_title, "operationToPerform: " . $this->operationToPerform);
             $params["Operation"] = $this->operationToPerform;
+            // Remember what we asked Cardcom for, so the IPN result can be checked against it.
+            $order->update_meta_data('_cardcom_lp_operation', (string)$this->operationToPerform);
+            $order->save();
             $params["ClientIP"] = $this->GetClientIP();
             if ($this->operationToPerform == '3') { /* token-only: skip InvoiceHeadOperation */ } elseif ($this->invoice == '1' && $this->operation != '3' && $this->operation != '6') {
                 $params['InvoiceHeadOperation'] = "1"; // Create Invoice
@@ -1696,7 +1820,7 @@ function woocommerce_cardcom_init()
             $urlencoded = http_build_query($this->senitize($params));
             $args = array('body' => $urlencoded,
                 'timeout' => '5',
-                'redirection' => '5',
+                'redirection' => 0, // never follow redirects with credentials in the body
                 'httpversion' => '1.0',
                 'blocking' => true,
                 'headers' => array(),
@@ -1706,8 +1830,9 @@ function woocommerce_cardcom_init()
             // ============================================================ //
             $response = $this->cardcom_post(self::$CardComURL . '/BillGoldLowProfile.aspx', $args);
             if (is_wp_error($response)) {
-                $IsOk = false;
-                return;
+                $this->last_lowprofile_error = __('The payment page could not be opened. Please try again or contact the store.', 'cardcom');
+                wc_add_notice($this->last_lowprofile_error, 'error');
+                return wc_get_checkout_url();
             }
             $body = wp_remote_retrieve_body($response);
             $exp = explode(';', $body);
@@ -1718,6 +1843,28 @@ function woocommerce_cardcom_init()
                 $data['profile'] = $exp[1];
                 // update_post_meta((int)$order_id, 'Profile', $data['profile']);
                 $order->update_meta_data( 'Profile',  $data['profile']);
+                // Bind the IPN result to this exact LowProfile: code, amount and currency we sent.
+                // WooCommerce reuses a pending order when the cart changes, so an older, cheaper
+                // LowProfile for the same order id must not be able to pay the updated order.
+                $order->update_meta_data('_cardcom_lp_code', (string)$data['profile']);
+                $order->update_meta_data('_cardcom_lp_sum', (string)$params['SumToBill']);
+                $order->update_meta_data('_cardcom_lp_currency', (string)$params['CoinISOName']);
+                // Every page issued for this order, so an earlier tab / reloaded page with the same amount
+                // still completes the order (review I2). Capped to the latest 10.
+                $issued = json_decode((string)$order->get_meta('_cardcom_lp_codes'), true);
+                if (!is_array($issued)) {
+                    $issued = array();
+                }
+                unset($issued[(string)$data['profile']]);
+                $issued[(string)$data['profile']] = array(
+                    'sum' => (string)$params['SumToBill'],
+                    'cur' => (string)$params['CoinISOName'],
+                    'op'  => (string)$params['Operation'],
+                );
+                if (count($issued) > 10) {
+                    $issued = array_slice($issued, -10, 10, true);
+                }
+                $order->update_meta_data('_cardcom_lp_codes', wp_json_encode($issued));
                 $order->save();
             } else {
                 $IsOk = false;
@@ -1730,7 +1877,9 @@ function woocommerce_cardcom_init()
             if ($IsOk) {
                 return $this->url . "?" . http_build_query($this->senitize($requestVars));
             } else {
-                return $this->urlError . "?massage=" . $this->senitize("Code : " . $exp[0] . " Description:" . $exp[2]);
+                $this->last_lowprofile_error = sprintf(__('The payment page could not be opened (Cardcom code %s). Please try again or contact the store.', 'cardcom'), self::get_clean_string($exp[0]));
+                wc_add_notice($this->last_lowprofile_error, 'error');
+                return wc_get_checkout_url();
             }
         }
 
@@ -1767,6 +1916,34 @@ function woocommerce_cardcom_init()
          * All token-charge callers (checkout token charge, capture charge, scheduled renewals)
          * must use this so they treat both outcomes the same way.
          */
+        /**
+         * Stores the deal number (as CardcomInternalDealNumber and the transaction id) and, when an invoice
+         * was created, the document number/type from a paid ChargeToken.aspx response.
+         *
+         * @param WC_Order $order
+         * @param array    $responseArray parse_str() of the ChargeToken response
+         * @return string the deal number, or '' when Cardcom returned none
+         */
+        private static function store_token_charge_references($order, $responseArray)
+        {
+            $deal = isset($responseArray['InternalDealNumber']) ? (string)$responseArray['InternalDealNumber'] : '';
+            if (!ctype_digit($deal) || (int)$deal <= 0) {
+                $deal = '';
+            }
+            if ($deal !== '') {
+                $order->update_meta_data('CardcomInternalDealNumber', $deal);
+                $order->set_transaction_id($deal);
+            }
+            $doc_no = isset($responseArray['InvoiceResponse_InvoiceNumber']) ? (string)$responseArray['InvoiceResponse_InvoiceNumber'] : '';
+            $doc_type = isset($responseArray['InvoiceResponse_InvoiceType']) ? (string)$responseArray['InvoiceResponse_InvoiceType'] : '';
+            if (ctype_digit($doc_no) && (int)$doc_no > 0 && $doc_type !== '') {
+                $order->update_meta_data('initial_document_no', $doc_no);
+                $order->update_meta_data('initial_document_type', $doc_type);
+            }
+            $order->save();
+            return $deal;
+        }
+
         private static function is_token_charge_paid($responseArray)
         {
             return isset($responseArray['ResponseCode'])
@@ -1802,46 +1979,314 @@ function woocommerce_cardcom_init()
 
         function HandleError($Error, $msg, $info)
         {
+            // Never mail or log the request body: it carries customer PII, the API user name and,
+            // in PCI mode, card data. Report only the code and Cardcom's (redacted) response text.
+            $response = self::redact_string(substr((string)$msg, 0, 500));
             if ($this->adminEmail != '') {
                 wp_mail($this->adminEmail, 'Cardcom payment gateway something went wrong',
-                    "Wordpress Transcation Faild!\n
-                    ==== XML Response ====\n
-                    Terminal Number:" . $this->terminalnumber . "\n
-                    Error Code:           " . $Error . "\n
-                    ==== Transaction Details ====\n
-                    Full Response :  " . $msg . "
-                    Info:         " . $info . "\n
-                    Please contact Cardcom support with this information"
-
+                    "Wordpress Transaction Failed!\n" .
+                    "Terminal Number: " . $this->terminalnumber . "\n" .
+                    "Error Code: " . $Error . "\n" .
+                    "Cardcom Response: " . $response . "\n" .
+                    "Please contact Cardcom support with this information"
                 );
             }
             // Always log critical errors regardless of debug setting
-            error_log("Cardcom ::: Handle Error ::: " .
-                "Wordpress Transcation Faild!\n
-                ==== XML Response ====\n
-                Terminal Number:" . $this->terminalnumber . "\n
-                Error Code:           " . $Error . "\n
-                ==== Transaction Details ====\n
-                Full Response :  " . $msg . "
-                Info:         " . $info . "\n
-                Please contact Cardcom support with this information");
+            $details = self::error_context($info);
+            error_log("Cardcom ::: Handle Error ::: Terminal Number: " . $this->terminalnumber .
+                " | Error Code: " . $Error . " | Cardcom Response: " . $response .
+                " | Request (redacted): " . (is_array($details) ? wp_json_encode($details) : $details));
+        }
+
+        /**
+         * Keys whose values must never reach logs or e-mails (compared case-insensitively, '.' == '_').
+         */
+        private static $redact_keys = array(
+            'key', 'order_key', 'token', 'tokentocharge_token', 'cardcom_token_val', 'cardcomtoken', 'cardnumber',
+            'tokentocharge_cardnumber', 'cvv2', 'tokentocharge_cvv2', 'cardownerid', 'identitynumber',
+            'tokentocharge_identitynumber', 'apipassword', 'apipass', 'userpassword', 'tokentocharge_userpassword',
+            'username', 'email', 'cardowneremail', 'invoicehead_email', 'tokentocharge_cardowneremail',
+            'cardownerphone', 'tokentocharge_cardownerphone', 'invoicehead_custmobileph', 'cardcom-card-number',
+            'cardcom-card-cvc', 'cardcom-citizen-id', 'cardcom_id_number', 'invoicehead_compid', 'custom',
+            'cardownername', 'tokentocharge_cardownername', 'invoicehead_custname', 'invoicehead_custaddresline1',
+            'invoicehead_custaddresline2', 'invoicehead_custcity', 'invoicehead_comments', 'extshvaparams_cardownername',
+            'errorredirecturl', 'indicatorurl', 'successredirecturl', 'cancelurl', 'cardholderidentitynumber',
+            'extshvaparams_cardtoken', 'extshvaparams_cardholderidentitynumber',
+        );
+
+        /**
+         * Returns a copy of $data with secrets replaced by '[redacted]' and lowprofilecode reduced to its last 4.
+         *
+         * @param array $data
+         * @return array
+         */
+        public static function redact($data)
+        {
+            if (!is_array($data)) {
+                return $data;
+            }
+            $out = array();
+            foreach ($data as $k => $v) {
+                $norm = str_replace('.', '_', strtolower((string)$k));
+                if (is_array($v)) {
+                    $out[$k] = self::redact($v);
+                } elseif (in_array($norm, self::$redact_keys, true)) {
+                    $out[$k] = '[redacted]';
+                } elseif ($norm === 'lowprofilecode' || $norm === 'profile' || $norm === '_cardcom_lp_code') {
+                    $out[$k] = self::mask_secret($v);
+                } else {
+                    $out[$k] = $v;
+                }
+            }
+            return $out;
+        }
+
+        /**
+         * Non-sensitive request fields worth keeping in an error log line.
+         *
+         * @param mixed $info array or urlencoded string
+         * @return array
+         */
+        private static function error_context($info)
+        {
+            $arr = array();
+            if (is_array($info)) {
+                $arr = isset($info['body']) && is_string($info['body']) ? array() : $info;
+                if (isset($info['body']) && is_string($info['body'])) parse_str($info['body'], $arr);
+            } elseif (is_string($info)) {
+                parse_str($info, $arr);
+            }
+            $keep = array('terminalnumber', 'SumToBill', 'TokenToCharge_SumToBill', 'Operation', 'ReturnValue', 'CoinISOName', 'Plugin');
+            return array_intersect_key($arr, array_flip($keep));
+        }
+
+        /**
+         * Redacts a query-string-like string (a=b&c=d); other strings are returned unchanged.
+         *
+         * @param string $s
+         * @return string
+         */
+        public static function redact_string($s)
+        {
+            if (strpos($s, '=') === false) {
+                return $s;
+            }
+            $parsed = array();
+            parse_str($s, $parsed);
+            return http_build_query(self::redact($parsed));
+        }
+
+        /**
+         * '...' + the last 4 characters, enough for support to match a log line to a deal.
+         *
+         * @param mixed $v
+         * @return string
+         */
+        public static function mask_secret($v)
+        {
+            $v = (string)$v;
+            return strlen($v) <= 4 ? '****' : '...' . substr($v, -4);
+        }
+
+        /**
+         * Hide Cardcom token / card meta from the order "Custom Fields" box. Hooked on is_protected_meta.
+         *
+         * @param bool   $protected
+         * @param string $meta_key
+         * @param string $meta_type
+         * @return bool
+         */
+        public static function protect_cardcom_meta($protected, $meta_key, $meta_type = '')
+        {
+            $exact = array('CardcomToken', 'CardcomTokenId', 'CardcomToken_expiry_year', 'CardcomToken_expiry_month',
+                'CardcomTokenExDate', 'cardcom_token_val', 'cardcom_Tokef', 'cardcom_Approval_Num', 'cardcom_CardOwnerID',
+                'cardcom_CardOwnerEmail', 'cardcom_CardOwnerName', 'cardcom_NumOfPayments', 'Profile');
+            $exact = array_merge($exact, array('cc_number', 'cc_holdername', 'cc_numofpayments', 'cc_firstpayment', 'cc_paymenttype',
+                'cc_total', 'cc_cardtype', 'cc_Sulac', 'cc_Mutag', 'cc_Tokef'));
+            if (in_array($meta_key, $exact, true)) {
+                return true;
+            }
+            return $protected;
+        }
+
+        /**
+         * True only when a LowProfile indicator result belongs to the LowProfile this plugin last issued
+         * for the order: same code, same operation, same amount and currency.
+         *
+         * Amount: ExtShvaParams.Sum36 is the card-processor sum in agorot (minor units). It is absent when no
+         * card transaction ran; that is only acceptable for token-only (3) and suspended (4) operations.
+         * Currency: CoinId is CardCom's numeric coin id; compared when both sides are numeric.
+         * Orders created before 3.6.0.0 have no _cardcom_lp_* meta; they keep the old checks plus an
+         * amount check against the order total.
+         *
+         * @param array    $response parse_str() of the indicator response
+         * @param WC_Order $order
+         * @param string   $lpc      LowProfile code the IPN claims
+         * @param string   $reason   Set to the first mismatching field
+         * @return bool
+         */
+        private static function lowprofile_result_matches_order($response, $order, $lpc, &$reason = '')
+        {
+            $actual_op = isset($response['Operation']) ? (string)$response['Operation'] : '';
+            $issued = json_decode((string)$order->get_meta('_cardcom_lp_codes'), true);
+            if (!is_array($issued)) {
+                $issued = array();
+            }
+            $latest = (string)$order->get_meta('_cardcom_lp_code');
+            if (!$issued && $latest !== '') {
+                // Pages issued by an earlier 3.6 build: one code with separate meta.
+                $issued[$latest] = array('sum' => (string)$order->get_meta('_cardcom_lp_sum'),
+                    'cur' => (string)$order->get_meta('_cardcom_lp_currency'), 'op' => (string)$order->get_meta('_cardcom_lp_operation'));
+            }
+
+            if (!$issued) {
+                // Legacy: page created before this version. Old checks plus the processor amount.
+                $total = (float)$order->get_total();
+                $expected_agorot = (int)round(($total > 0 ? $total : 0.01) * 100);
+                if (isset($response['ExtShvaParams_Sum36']) && $response['ExtShvaParams_Sum36'] !== '') {
+                    if ($actual_op !== '3' && (int)$response['ExtShvaParams_Sum36'] !== $expected_agorot) {
+                        $reason = 'amount mismatch';
+                        return false;
+                    }
+                } elseif ($actual_op !== '3' && $actual_op !== '4') {
+                    $reason = 'amount missing';
+                    return false;
+                }
+                return true;
+            }
+
+            // 1. The code must be one this plugin issued for this order.
+            $entry = null;
+            foreach ($issued as $code => $e) {
+                if (hash_equals((string)$code, (string)$lpc)) {
+                    $entry = $e;
+                    break;
+                }
+            }
+            if ($entry === null) {
+                $reason = 'payment page mismatch';
+                return false;
+            }
+            // 2. Same operation we asked for (blocks token-only / validate-only pages for a charge).
+            if (isset($entry['op']) && $entry['op'] !== '' && $actual_op !== (string)$entry['op']) {
+                $reason = 'operation mismatch';
+                return false;
+            }
+            // 3. The page's amount and currency must still be what the order bills now (cart may have changed).
+            $op = (isset($entry['op']) && $entry['op'] !== '') ? (string)$entry['op'] : $actual_op;
+            if ($op !== '3') {
+                $now = self::initInvoice($order->get_id());
+                $now_sum = isset($now['SumToBill']) ? number_format((float)$now['SumToBill'], 2, '.', '') : '';
+                if (number_format((float)$entry['sum'], 2, '.', '') !== $now_sum) {
+                    $reason = 'amount mismatch';
+                    return false;
+                }
+            }
+            if (isset($entry['cur']) && strtoupper((string)$entry['cur']) !== strtoupper((string)$order->get_currency())) {
+                $reason = 'currency mismatch';
+                return false;
+            }
+            if (isset($response['CoinId']) && $response['CoinId'] !== '') {
+                $expected_coin = self::GetCurrency_from_iso((string)$entry['cur']);
+                if ($expected_coin !== null && (string)$expected_coin !== (string)$response['CoinId']) {
+                    $reason = 'currency mismatch';
+                    return false;
+                }
+            }
+            // 4. Processor amount (agorot): informational until verified live for every payment type.
+            if ($op !== '3' && isset($response['ExtShvaParams_Sum36']) && $response['ExtShvaParams_Sum36'] !== ''
+                && (int)$response['ExtShvaParams_Sum36'] !== (int)round(((float)$entry['sum']) * 100)) {
+                $order->add_order_note(sprintf(__('Cardcom reported a processor amount of %s (agorot) for a payment page of %s. Please verify the deal in Cardcom.', 'cardcom'),
+                    (int)$response['ExtShvaParams_Sum36'], $entry['sum']));
+            }
+            return true;
+        }
+
+        /**
+         * CardCom numeric coin id for an ISO currency code, or null when the plugin has no mapping.
+         *
+         * @param string $iso
+         * @return int|null
+         */
+        private static function GetCurrency_from_iso($iso)
+        {
+            $map = array('ILS' => 1, 'NIS' => 1, 'USD' => 2, 'AUD' => 36, 'CAD' => 124, 'DKK' => 208, 'JPY' => 392,
+                'CHF' => 756, 'GBP' => 826, 'EUR' => 978, 'RUB' => 643, 'SEK' => 752, 'NOK' => 578);
+            $iso = strtoupper((string)$iso);
+            return isset($map[$iso]) ? $map[$iso] : null;
+        }
+
+        /**
+         * The LowProfile Operation for an order, decided from the gateway settings only.
+         *
+         * @param WC_Order|null $order
+         * @return string
+         */
+        private function resolve_lowprofile_operation($order)
+        {
+            if ($order && $order->get_meta('_cardcom_changing_payment_method') === 'yes') {
+                return '3';
+            }
+            switch ((string)$this->operation) {
+                case '2':
+                    return '2';
+                case '3':
+                case '6':
+                    return '3';
+                case '4':
+                case '5':
+                    return '4';
+                default:
+                    return '1';
+            }
+        }
+
+        /**
+         * Send the shopper to $url. Inside the Cardcom iframe the top window must navigate, so a small script
+         * is printed with the URL JSON-encoded (no quote/script break-out); otherwise a normal HTTP redirect.
+         * Always ends the request.
+         *
+         * @param string $url
+         */
+        protected function redirect_top($url)
+        {
+            $url = esc_url_raw((string)$url);
+            if ($url === '') {
+                $url = home_url('/');
+            }
+            if ($this->UseIframe == 1) {
+                echo '<script>window.top.location.href = ' . wp_json_encode($url) . ';</script>';
+            } else {
+                // wp_redirect (not wp_safe_redirect): these URLs are built server-side and the thank-you URL
+                // may legitimately be filtered to another host by funnel plugins.
+                wp_redirect($url);
+            }
+            $this->end_request();
+        }
+
+        /** Ends the request; separate so tests can intercept it. */
+        protected function end_request()
+        {
+            exit();
         }
 
         function generate_cardcom_form($order_id)
         {
+            $this->last_lowprofile_error = '';
             $URL = $this->GetRedirectURL($order_id);
-            $formstring = '<iframe allow="payment" width="100%" height="1000" frameborder="0" src="' . $URL . '" ></iframe>';
+            if ($this->last_lowprofile_error !== '') {
+                return '<p class="woocommerce-error">' . esc_html($this->last_lowprofile_error) . '</p>';
+            }
+            $formstring = '<iframe allow="payment" width="100%" height="1000" frameborder="0" src="' . esc_url($URL) . '" ></iframe>';
             return $formstring;
         }
 
         function receipt_page($order)
         {
-            $this->operationToPerform = $_GET['operation'];
-            if ($this->operationToPerform != '2' && $this->operationToPerform != '3' && $this->operationToPerform != '4' && $this->operationToPerform != '5') {
-                $this->operationToPerform = '1';
-                // Always log configuration warnings
-                error_log("Cardcom ::: receipt page method ::: operationToPerform was not set, setting it to default");
-            }
+            // Never take the operation from the request: a shopper could turn a charge into a
+            // token-only (no charge) page and still get the order marked paid.
+            $order_obj = wc_get_order($order);
+            $this->operationToPerform = $order_obj ? $this->resolve_lowprofile_operation($order_obj) : $this->resolve_lowprofile_operation(null);
             echo $this->generate_cardcom_form($order);
         }
 
@@ -1900,12 +2345,7 @@ function woocommerce_cardcom_init()
                         WC()->cart->empty_cart();
                     }
                     $redirectTo = home_url( '/' );
-                    if ( $this->UseIframe == 1 ) {
-                        echo '<script>window.top.location.href = ' . wp_json_encode( $redirectTo ) . ';</script>';
-                    } else {
-                        wp_safe_redirect( $redirectTo );
-                    }
-                    exit();
+                    $this->redirect_top( $redirectTo );
                 }
                 status_header( 403 );
                 wp_die( esc_html__( 'Invalid request.', 'cardcom' ), '', array( 'response' => 403 ) );
@@ -1955,7 +2395,10 @@ function woocommerce_cardcom_init()
             $order_id = intval($get["order_id"]);
             global $woocommerce;
 
-            $order = new WC_Order($order_id);
+            $order = wc_get_order($order_id);
+            if (!$order) {
+                $order = new WC_Order($order_id);
+            }
 
             if (!empty($order_id)) {
 
@@ -1970,24 +2413,11 @@ function woocommerce_cardcom_init()
                     $order->save();
 
                     $subscriptionUrl = $order->get_view_order_url();
-                    if ($this->UseIframe == 1) {
-                        echo "<script>window.top.location.href = \"$subscriptionUrl\";</script>";
-                        exit();
-                    } else {
-                        wp_redirect($subscriptionUrl);
-                        die();
-                    }
+                    $this->redirect_top($subscriptionUrl);
                 }
 
-                $cancelUrl = $order->get_cancel_order_url();
-                if ($this->UseIframe == 1) {
-                    // wp_redirect($cancelUrl);
-                    echo "<script>window.top.location.href = \"$cancelUrl\";</script>";
-                    exit();
-                } else {
-                    wp_redirect($cancelUrl);
-                    die();
-                }
+                $cancelUrl = $order->get_cancel_order_url_raw(); // raw: get_cancel_order_url() is HTML-escaped (&amp;) and breaks the redirect
+                $this->redirect_top($cancelUrl);
             }
 
         }
@@ -2006,22 +2436,11 @@ function woocommerce_cardcom_init()
                 $subscription->save();
 
                 $subscriptionUrl = $subscription->get_view_order_url();
-                if ($this->UseIframe == 1) {
-                    echo "<script>window.top.location.href = \"$subscriptionUrl\";</script>";
-                    exit();
-                } else {
-                    wp_redirect($subscriptionUrl);
-                    die();
-                }
+                $this->redirect_top($subscriptionUrl);
             }
 
             if ($this->failedUrl != '') {
-                if ($this->UseIframe == 1) {
-                    echo "<script>window.top.location.href = \"$this->failedUrl\";</script>";
-                    exit();
-                } else {
-                    wp_redirect($this->failedUrl);
-                }
+                $this->redirect_top($this->failedUrl);
             } else
             $this->cancel_request($get);
 
@@ -2035,23 +2454,78 @@ function woocommerce_cardcom_init()
 
             $lowprofilecode = $posted["lowprofilecode"];
             $orderid = htmlentities($posted["order_id"]);
-            self::cardcom_log($log_title, "LowProfile Code : " . $lowprofilecode);
+            self::cardcom_log($log_title, "LowProfile Code : " . self::mask_secret($lowprofilecode));
             self::cardcom_log($log_title, "Order Id : " . $orderid);
 
-            $order       = wc_get_order( (int) $orderid );
-            $key_1_value = $order ? $order->get_meta( 'IsIpnRecieved' ) : '';
-            if (!empty($key_1_value) && $key_1_value == 'true') {
-                //error_log("Order has been processed: ".$key_1_value);
-                return;
+            // One IPN per order at a time: Cardcom retries and the shopper's redirect can arrive together,
+            // and both would otherwise pass the IsIpnRecieved check (duplicate tokens / payment_complete).
+            $order_id_int = (int) $orderid;
+            if ( ! self::acquire_order_lock( $order_id_int ) ) {
+                self::cardcom_log($log_title, "Another IPN is processing order " . $order_id_int . " - skipped");
+                return true;
+            }
+            try {
+                // Re-read after acquiring the lock so a just-finished IPN is seen.
+                $order       = wc_get_order( $order_id_int );
+                $key_1_value = $order ? $order->get_meta( 'IsIpnRecieved' ) : '';
+                if (!empty($key_1_value) && $key_1_value == 'true') {
+                    return;
+                }
+
+                return $this->updateOrder($lowprofilecode, $orderid);
+            } finally {
+                self::release_order_lock( $order_id_int );
             }
 
-            return $this->updateOrder($lowprofilecode, $orderid);
+        }
 
+        /**
+         * MySQL lock names are server-wide; scope them to this site (DB name + table prefix) so sites sharing a
+         * database server do not block each other's IPNs. 48 chars (< 64 limit).
+         *
+         * @param int $order_id
+         * @return string
+         */
+        public static function order_lock_name($order_id)
+        {
+            global $wpdb;
+            $prefix = (isset($wpdb) && is_object($wpdb) && isset($wpdb->prefix)) ? $wpdb->prefix : '';
+            return 'cardcom_' . sha1((defined('DB_NAME') ? DB_NAME : '') . '|' . $prefix . '|' . (int)$order_id);
+        }
+
+        /**
+         * Non-blocking per-order MySQL named lock.
+         *
+         * @param int $order_id
+         * @return bool true when this request now holds the lock
+         */
+        private static function acquire_order_lock($order_id)
+        {
+            global $wpdb;
+            if (!isset($wpdb) || !is_object($wpdb)) {
+                return true;
+            }
+            // '0' = another request holds it. NULL = GET_LOCK failed/unsupported: proceed rather than drop the IPN.
+            return (string)$wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, 0)', self::order_lock_name($order_id))) !== '0';
+        }
+
+        /**
+         * @param int $order_id
+         */
+        private static function release_order_lock($order_id)
+        {
+            global $wpdb;
+            if (isset($wpdb) && is_object($wpdb)) {
+                $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', self::order_lock_name($order_id)));
+            }
         }
 
         function updateOrder($lowprofilecode, $orderid)
         {
-            $order = new WC_Order($orderid);
+            $order = wc_get_order($orderid);
+            if (!$order) {
+                $order = new WC_Order($orderid);
+            }
 
             // ========== Handle subscription payment method change ========== //
             $is_changing_payment_method = $order->get_meta( '_cardcom_changing_payment_method' );
@@ -2145,6 +2619,14 @@ function woocommerce_cardcom_init()
             $subscription->add_order_note( __( 'Payment method updated successfully via Cardcom.', 'cardcom' ) );
             $subscription->save();
 
+            // We exit before WooCommerce Subscriptions' own change-payment handler runs, so set the
+            // payment method here. This also takes the subscription off manual renewal (bug 7610).
+            if ( class_exists( 'WC_Subscriptions_Change_Payment_Gateway' ) ) {
+                WC_Subscriptions_Change_Payment_Gateway::update_payment_method( $subscription, $this->id );
+                $subscription->save();
+                self::cardcom_log($log_title, "Payment method set to " . $this->id . ", requires manual renewal: " . ( $subscription->is_manual() ? 'yes' : 'no' ));
+            }
+
             self::cardcom_log($log_title, "Subscription payment method updated successfully");
             return true;
         } else {
@@ -2163,7 +2645,10 @@ function woocommerce_cardcom_init()
     {
 
         $orderid = htmlentities($posted["order_id"]);
-        $order = new WC_Order($orderid);
+        $order = wc_get_order($orderid);
+        if (!$order) {
+            $order = new WC_Order($orderid);
+        }
         if (!empty($orderid)) {
 
             // ========== Handle subscription payment method change redirect ========== //
@@ -2172,13 +2657,7 @@ function woocommerce_cardcom_init()
                 $redirectTo = $sub ? $sub->get_view_order_url() : home_url('/my-account/');
                 self::cardcom_log("successful_request", "Subscription payment method change — redirecting to subscription page: " . $redirectTo);
 
-                if ($this->UseIframe) {
-                    echo "<script>window.top.location.href =\"$redirectTo\";</script>";
-                    exit();
-                } else {
-                    wp_redirect($redirectTo);
-                    exit();
-                }
+                $this->redirect_top($redirectTo);
                 return true;
             }
 
@@ -2190,12 +2669,7 @@ function woocommerce_cardcom_init()
 
             }
 
-            if ($this->UseIframe) {
-                echo "<script>window.top.location.href =\"$redirectTo\";</script>";
-                exit();
-            } else {
-                wp_redirect($redirectTo);
-            }
+            $this->redirect_top($redirectTo);
             return true;
         }
         wp_redirect("/");
@@ -2236,7 +2710,7 @@ function woocommerce_cardcom_init()
             $urlencoded = http_build_query($this->senitize($vars));
             $args = array('body' => $urlencoded,
                 'timeout' => '5',
-                'redirection' => '5',
+                'redirection' => 0, // never follow redirects with credentials in the body
                 'httpversion' => '1.0',
                 'blocking' => true,
                 'headers' => array(),
@@ -2304,9 +2778,16 @@ function woocommerce_cardcom_init()
 
             if (isset($responseArray['OperationResponse'])
                 && $responseArray['OperationResponse'] == '0'
+                && isset($responseArray['ReturnValue'])
                 && $responseArray['ReturnValue'] == $order_id) #  Normal Deal
             {
-                $returnvalue = '0';
+                $mismatch = '';
+                if (self::lowprofile_result_matches_order($responseArray, $order, (string)$lpc, $mismatch)) {
+                    $returnvalue = '0';
+                } else {
+                    self::cardcom_log($log_title, "LowProfile result rejected for order " . $order_id . ": " . $mismatch);
+                    $order->add_order_note(sprintf(__('Cardcom payment result rejected (%s). The customer may have paid an outdated payment page; please verify the deal in Cardcom before shipping.', 'cardcom'), $mismatch));
+                }
             }
             if ($returnvalue == '0') {
                 try {
@@ -2315,6 +2796,11 @@ function woocommerce_cardcom_init()
                     if ($LPD_Operation === '2' || $LPD_Operation === '3') {
                         $token = $this->create_cardcom_token($responseArray, $order_id);
                         self::cardcom_log($log_title, "Order's Token " . $token->get_id());
+                        if ($order->get_meta('_cardcom_changing_payment_method') === 'yes') {
+                            // Card change: renewals read the first Cardcom token on the subscription,
+                            // so the old one must go or the new card is never used (bug 7610).
+                            $this->detach_cardcom_tokens_from_order($order);
+                        }
                         $this->save_token_in_order($token, $order);
                         $this->save_token_in_order_v2($token, $order);
                         if ($isCreateToken) {
@@ -2337,10 +2823,10 @@ function woocommerce_cardcom_init()
                 $order->update_meta_data( 'Payment Gateway', 'CardCom' );
                 $order->save();
                 // add_post_meta($order_id, 'initial_document_type', $responseArray['InvoiceType']);
-                $order->update_meta_data( 'initial_document_type', $responseArray['InvoiceType'] );
+                $order->update_meta_data( 'initial_document_type', $responseArray['InvoiceType'] ?? '' );
                 $order->save();
                 // add_post_meta($order_id, 'initial_document_no', $responseArray['InvoiceNumber']);
-                $order->update_meta_data( 'initial_document_no', $responseArray['InvoiceNumber'] );
+                $order->update_meta_data( 'initial_document_no', $responseArray['InvoiceNumber'] ?? '' );
                 $order->save();
                 // add_post_meta($order_id, 'cc_number', $responseArray['ExtShvaParams_CardNumber5']);
                 $order->update_meta_data( 'cc_number', $responseArray['ExtShvaParams_CardNumber5'] );
@@ -2388,30 +2874,34 @@ function woocommerce_cardcom_init()
                 $order->save();
 
             }
-            if ($isSetToCaptureCharge) {
+            // Only persist Capture-Charge data for a successful LowProfile result. A failed attempt
+            // (e.g. an unsupported card brand, then a retry with another card) fires its own IPN with
+            // no Token in the response; writing it here used to store an empty 'cardcom_token_val'
+            // that get_meta() kept returning even after the successful retry appended the real one.
+            // update_meta_data() replaces the single value instead of appending a duplicate.
+            if ($isSetToCaptureCharge && $returnvalue == '0') {
                 self::cardcom_log("$log_title", "Saving data to Capture Charge the updated price");
-                $order->add_meta_data('cardcom_charge_captured', 'no');
-                $order->add_meta_data('cardcom_token_val', $responseArray["Token"]);
+                $order->update_meta_data('cardcom_charge_captured', 'no');
+                $order->update_meta_data('cardcom_token_val', isset($responseArray["Token"]) ? $responseArray["Token"] : '');
                 // Fixing issue with TokenApproval getting '+' chars for some odd reasons (probably from the SERVER)
-                
+
                 if( isset( $responseArray["TokenApprovalNumber"] ) && !empty( $responseArray["TokenApprovalNumber"] ) ){
                     $ApprovalNumber = preg_replace("/[^0-9]/", "", $responseArray["TokenApprovalNumber"]);
-                    $order->add_meta_data('cardcom_Approval_Num', $ApprovalNumber);
+                    $order->update_meta_data('cardcom_Approval_Num', $ApprovalNumber);
                 }
 
-                $order->add_meta_data('cardcom_NumOfPayments', $responseArray["NumOfPayments"]);
+                $order->update_meta_data('cardcom_NumOfPayments', $responseArray["NumOfPayments"]);
                 $tokenExpireMonth = str_pad((string)$responseArray["CardValidityMonth"], 2, '0', STR_PAD_LEFT);
                 $tokenExpireYear = str_pad((string)$responseArray["CardValidityYear"], 4, '0', STR_PAD_LEFT);
-                $order->add_meta_data('cardcom_Tokef', $tokenExpireMonth . substr($tokenExpireYear, 2, 2));
-                $order->add_meta_data('cardcom_CardOwnerName', $responseArray["CardOwnerName"]);
-                $order->add_meta_data('cardcom_CardOwnerEmail', $responseArray["CardOwnerEmail"]);
-                $order->add_meta_data('cardcom_CardOwnerID', $responseArray["CardOwnerID"]);
+                $order->update_meta_data('cardcom_Tokef', $tokenExpireMonth . substr($tokenExpireYear, 2, 2));
+                $order->update_meta_data('cardcom_CardOwnerName', $responseArray["CardOwnerName"]);
+                $order->update_meta_data('cardcom_CardOwnerEmail', $responseArray["CardOwnerEmail"]);
+                $order->update_meta_data('cardcom_CardOwnerID', $responseArray["CardOwnerID"]);
                 $order->save_meta_data();
-                if($returnvalue == '0'){
-                    $order->update_status("on-hold", "On hold for capture charge-2");
-					$order->save();
-				}
-				
+                $order->update_status("on-hold", "On hold for capture charge-2");
+                $order->save();
+            } elseif ($isSetToCaptureCharge) {
+                self::cardcom_log("$log_title", "LowProfile result is not OK - Capture Charge data not saved");
             }
             do_action('cardcom_IsLowProfileCodeDealOneOK', $returnvalue, $responseArray, $order_id);
             return $returnvalue;
@@ -2443,7 +2933,7 @@ function woocommerce_cardcom_init()
                 $this->cardcom_token_validation_form();
             }
             // -------------- Render Description if set -------------- //
-            if ($this->description) : ?><p><?php echo $this->description; ?></p> <?php endif; ?>
+            if ($this->description) : ?><p><?php echo wp_kses_post($this->description); ?></p> <?php endif; ?>
             <?php
         }
 
@@ -2586,10 +3076,14 @@ function woocommerce_cardcom_init()
             }
             // ============= If user selected saved payment (i.e. Token)  ============= //
             if ($paymentTokenValue !== null && $paymentTokenValue !== 'new') {
-                $token_id = wc_clean($paymentTokenValue);
-                $token = WC_Payment_Tokens::get($token_id);
-                if ($token->get_user_id() !== get_current_user_id()) {
-                    return;
+                // Only the logged-in owner may charge a saved Cardcom token. Order-level tokens are stored
+                // without a user (user_id 0), so a bare "owner == current user" check let guests charge
+                // any stored card by its (sequential) token id.
+                $token = $this->get_owned_cardcom_token($paymentTokenValue);
+                if ($token === null) {
+                    self::cardcom_log($log_title, "Rejected saved token: not owned by the current user");
+                    wc_add_notice(__('The selected payment method is not available.', 'cardcom'), 'error');
+                    return false;
                 }
                 $params['TokenToCharge.Token'] = $token->get_token();
                 $params['TokenToCharge.CardValidityMonth'] = $token->get_expiry_month();
@@ -2626,9 +3120,10 @@ function woocommerce_cardcom_init()
             $params['TokenToCharge.NumOfPayments'] = $numOfPayments === null ? '1' : $numOfPayments;
             $params['CustomeFields.Field25'] = "order_id : " . $order_id . ' ' . "Token Charge";
             $urlencoded = http_build_query($this->senitize($params));
+            $urlencoded = $this->append_api_password($urlencoded);
             $args = array('body' => $urlencoded,
                 'timeout' => '10',
-                'redirection' => '5',
+                'redirection' => 0, // never follow redirects with credentials in the body
                 'httpversion' => '1.0',
                 'blocking' => true,
                 'headers' => array(),
@@ -2747,21 +3242,23 @@ function woocommerce_cardcom_init()
                 }
                 // ================ If Capture-Charge Deal, set more meta data on order ================ //
                 if ($this->operation == '6') {
-                    $order->add_meta_data('cardcom_charge_captured', 'no');
-                    $order->add_meta_data('cardcom_token_val', $responseArray["Token"]);
+                    // update_meta_data() so a retried checkout replaces the capture data instead of
+                    // appending duplicates (get_meta() returns the first stored value).
+                    $order->update_meta_data('cardcom_charge_captured', 'no');
+                    $order->update_meta_data('cardcom_token_val', isset($responseArray["Token"]) ? $responseArray["Token"] : '');
                     // Fixing issue with TokenApproval getting '+' chars for some odd reasons (probably from the SERVER)
                     if( isset( $responseArray["ApprovalNumber"] ) && !empty( $responseArray["ApprovalNumber"] ) ){
                         $ApprovalNumber = preg_replace("/[^0-9]/", "", $responseArray["ApprovalNumber"]);
-                        $order->add_meta_data('cardcom_Approval_Num', $ApprovalNumber);
+                        $order->update_meta_data('cardcom_Approval_Num', $ApprovalNumber);
                     }
-                    $order->add_meta_data('cardcom_NumOfPayments', $numOfPayments === null ? '1' : $numOfPayments);
-                    $order->add_meta_data('cardcom_Tokef', $responseArray["Tokef_30"]);
+                    $order->update_meta_data('cardcom_NumOfPayments', $numOfPayments === null ? '1' : $numOfPayments);
+                    $order->update_meta_data('cardcom_Tokef', $responseArray["Tokef_30"]);
                     $FullName = $order->get_billing_first_name() . ' ' . $order->get_billing_last_name();
-                    $order->add_meta_data('cardcom_CardOwnerName', $FullName);
-                    $order->add_meta_data('cardcom_CardOwnerEmail', $order->get_billing_email());
+                    $order->update_meta_data('cardcom_CardOwnerName', $FullName);
+                    $order->update_meta_data('cardcom_CardOwnerEmail', $order->get_billing_email());
                     $CardOwnerID = $this->get_post("cardcom-citizen-id");
                     if (isset($CardOwnerID)) {
-                        $order->add_meta_data('cardcom_CardOwnerID', $CardOwnerID);
+                        $order->update_meta_data('cardcom_CardOwnerID', $CardOwnerID);
                     }
                     $order->save_meta_data();
                     $order->update_status("on-hold", __('Capture Charge - Deal captured to charge later', 'cardcom'));
@@ -2789,15 +3286,61 @@ function woocommerce_cardcom_init()
             }
         }
 
+        /**
+         * Appends TokenToCharge.UserPassword to an already-encoded ChargeToken body when the merchant opted in.
+         * Added after senitize() so the password is sent exactly as configured (senitize strips tags / truncates).
+         *
+         * @param string $urlencoded
+         * @return string
+         */
+        private function append_api_password($urlencoded)
+        {
+            if (self::$send_api_password === '1' && self::IsStringSet(self::$api_password)) {
+                $urlencoded .= '&' . http_build_query(array('TokenToCharge.UserPassword' => self::$api_password));
+            }
+            return $urlencoded;
+        }
+
+        /**
+         * Returns the saved Cardcom token only when it belongs to the logged-in user.
+         *
+         * @param mixed $token_id Token id as posted by the checkout.
+         * @return WC_Payment_Token|null
+         */
+        private function get_owned_cardcom_token($token_id)
+        {
+            $token_id = absint($token_id);
+            if ($token_id <= 0) {
+                return null;
+            }
+            $token = WC_Payment_Tokens::get($token_id);
+            if (!$token || $token->get_gateway_id() !== $this->id) {
+                return null;
+            }
+            $owner = (int)$token->get_user_id();
+            if ($owner <= 0 || $owner !== (int)get_current_user_id()) {
+                return null;
+            }
+            return $token;
+        }
+
         function GetCurrentURL()
         {
-            $link = "";
-            $link .= $_SERVER['HTTP_HOST'];
-            return $link;
+            // The site's own host, not the (client-controlled) Host header: this feeds UniqAsmachta,
+            // Cardcom's duplicate-charge guard.
+            $host = wp_parse_url(home_url(), PHP_URL_HOST);
+            return $host ? (string)$host : '';
         }
 
         function GetClientIP()
         {
+            // Proxy headers are client-controlled; trust them only when the merchant says a proxy/CDN sets them.
+            if (!apply_filters('cardcom_trust_proxy_headers', false)) {
+                return isset($_SERVER['REMOTE_ADDR']) ? sanitize_text_field(wp_unslash($_SERVER['REMOTE_ADDR'])) : '';
+            }
+            if (class_exists('WC_Geolocation')) {
+                return sanitize_text_field(WC_Geolocation::get_ip_address());
+            }
             if (!empty($_SERVER['HTTP_CLIENT_IP']))   //check ip from share internet
             {
                 $ip = $_SERVER['HTTP_CLIENT_IP'];
@@ -2825,7 +3368,7 @@ function woocommerce_cardcom_init()
         private function get_post($name)
         {
             if (isset($_POST[$name]))
-                return $_POST[$name];
+                return wc_clean(wp_unslash($_POST[$name]));
             return null;
         }
 
@@ -3030,6 +3573,29 @@ function woocommerce_cardcom_init()
         }
 
         /**
+         * Removes Cardcom tokens from the order's token list without deleting the tokens,
+         * since the parent order and earlier renewals may still reference them.
+         * @param $order WC_Order
+         */
+        public function detach_cardcom_tokens_from_order($order)
+        {
+            $log_title = "detach_cardcom_tokens_from_order";
+            $token_ids = $order->get_payment_tokens();
+            $kept = array();
+            foreach ($token_ids as $token_id) {
+                $token = WC_Payment_Tokens::get($token_id);
+                if ($token && $token->get_gateway_id() === $this->id) {
+                    self::cardcom_log($log_title, "Detached token " . $token_id . " from order " . $order->get_id());
+                    continue;
+                }
+                $kept[] = $token_id;
+            }
+            if (count($kept) !== count($token_ids)) {
+                $order->get_data_store()->update_payment_token_ids($order, $kept);
+            }
+        }
+
+        /**
          * @param $order WC_Order
          * @param $token WC_Payment_Token_CC
          */
@@ -3153,9 +3719,10 @@ function woocommerce_cardcom_init()
                 $request["TokenToCharge.CardOwnerEmail"] = self::get_clean_string($renewal_order->get_billing_email());
                 $request["TokenToCharge.CardOwnerPhone"] = self::get_clean_string($renewal_order->get_billing_phone());
                 $urlencoded = http_build_query($this->senitize($request));
+                $urlencoded = $this->append_api_password($urlencoded);
                 $args = array('body' => $urlencoded,
                     'timeout' => '10',
-                    'redirection' => '5',
+                    'redirection' => 0, // never follow redirects with credentials in the body
                     'httpversion' => '1.0',
                     'blocking' => true,
                     'headers' => array(),
@@ -3183,7 +3750,10 @@ function woocommerce_cardcom_init()
                     }
                     $renewal_order->add_order_note($msg_prefix . __("Scheduled payment for Renewal Order", "cardcom")
                         . " # " . $renewal_order_id . " ✅ " . $payment_date_time);
-                    $renewal_order->payment_complete();
+                    // Keep the renewal's own deal / document numbers so the Cardcom refund and cancel-document
+                    // order actions work on renewal orders (each renewal is a separate Cardcom transaction).
+                    $renewal_deal_number = self::store_token_charge_references($renewal_order, $responseArray);
+                    $renewal_order->payment_complete($renewal_deal_number);
                 } else {
                     self::cardcom_log($log_title, "Deal Failed with: " . $renewal_order_id);
                     $renewal_order->add_order_note($msg_prefix . __("Scheduled payment for Renewal Order", "cardcom")
@@ -3338,7 +3908,7 @@ function woocommerce_cardcom_init()
                 $urlencoded = http_build_query($this->senitize($request));
                 $args = array('body' => $urlencoded,
                     'timeout' => '10',
-                    'redirection' => '5',
+                    'redirection' => 0, // never follow redirects with credentials in the body
                     'httpversion' => '1.0',
                     'blocking' => true,
                     'headers' => array(),
@@ -3614,7 +4184,7 @@ function woocommerce_cardcom_init()
         static function cardcom_log_wc( $handle, $data )
         {
             if ( isset( self::$debug_logging ) && self::$debug_logging === '1' ) {
-                ( new WC_Logger() )->add( $handle, print_r( $data, true ) );
+                ( new WC_Logger() )->add( $handle, print_r( is_array( $data ) ? self::redact( $data ) : $data, true ) );
             }
         }
 
@@ -3791,7 +4361,7 @@ function woocommerce_cardcom_init()
         $cardcom_settings = get_option('woocommerce_cardcom_settings', array());
         if (isset($cardcom_settings['debug_logging']) && $cardcom_settings['debug_logging'] === '1') {
             echo '<div class="notice notice-warning is-dismissible">
-                    <p>' . __('CardCom Debug Logging is enabled. Remember to disable it after troubleshooting to avoid excessive log entries.', 'cardcom') . '</p>
+                    <p>' . esc_html__('CardCom Debug Logging is enabled. Remember to disable it after troubleshooting to avoid excessive log entries.', 'cardcom') . '</p>
                   </div>';
         }
     });
