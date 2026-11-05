@@ -5,7 +5,7 @@ Tags: woocommerce, payment-gateway, checkout
 Requires at least: 7.0
 Requires PHP: 8.2
 Tested up to: 7.1
-Stable tag: 3.6.0.0
+Stable tag: 3.6.0.1
 License: GPLv2 or later
 License URI: https://secure.cardcom.co.il/Html/agreement/agreement.htm
 
@@ -129,6 +129,13 @@ Please advise [relevant support article](https://support.cardcom.solutions/hc/he
 
 == Changelog ==
 
+= 3.6.0.1 =
+* Fix: on Cardcom terminals set to change the payment operation (for example turning every payment into a J5 suspended deal), 3.6.0.0 marked successful payments as failed ("operation mismatch") and the customer received a failed-order e-mail. Payments are now accepted when Cardcom charged the card, created a suspended deal, or saved the card with a J5 hold, and an order note says what Cardcom did. A result that only saved the card without charging or holding it is still rejected.
+* Fix: result codes 0 and 701 (successful J5) are both treated as a successful payment, as before 3.6.0.0.
+* Fix: Capture Charge (operation 6) orders that Cardcom charged or held directly are completed instead of staying pending, and are not captured again later. An order whose payment Cardcom turned into a saved card with a J5 hold waits for capture like a Capture Charge order.
+* Fix: with Capture Charge (operation 6) the Order Status setting was saved empty; it is now treated as "on-hold", as shown on the settings screen.
+* Fix: the order's payment details (number of payments, first payment, payment type, total, card type) are visible again in the order Custom Fields box. Card tokens, approval number, card expiry and card-owner details stay hidden.
+
 = 3.6.0.0 =
 * Security hardening: saved cards can only be used by their logged-in owner; payment results are verified against the order (payment page, operation, amount, currency) before an order is marked paid; subscription card changes require the subscription owner.
 * Sensitive data (tokens, ID numbers, e-mail, order keys) is no longer written to logs or error e-mails.
@@ -141,6 +148,9 @@ Please advise [relevant support article](https://support.cardcom.solutions/hc/he
 Please advise the [plugin development log](https://plugins.trac.wordpress.org/log/woo-cardcom-payment-gateway/) for changes.
 
 == Upgrade notice ==
+
+= 3.6.0.1 =
+Important for stores whose Cardcom terminal turns payments into suspended (J5) deals or changes the payment operation: 3.6.0.0 marked these payments as failed. Also shows the order's payment details in the Custom Fields box again.
 
 = 3.6.0.0 =
 Security release. Requires PHP 8.2, WordPress 7.0 and WooCommerce 11.1 or newer. Fixes Capture Charge and subscription card-change issues.

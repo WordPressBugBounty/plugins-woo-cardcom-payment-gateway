@@ -3,8 +3,8 @@
 Plugin Name: CardCom Payment Gateway
 Plugin URI: https://support.cardcom.solutions/hc/he/articles/360007128393-%D7%97%D7%99%D7%91%D7%95%D7%A8-%D7%94%D7%A1%D7%9C%D7%99%D7%A7%D7%94-%D7%9C%D7%97%D7%A0%D7%95%D7%AA-%D7%95%D7%95%D7%A8%D7%93%D7%A4%D7%A8%D7%A1-Wordpress-Woocommerce-Payment-WOO
 Description: CardCom Payment gateway for Woocommerce
-Version: 3.6.0.0
-Changes: Security hardening release - saved cards only usable by their logged-in owner; payment results verified against the order (payment page, operation, amount, currency); subscription card changes require the owner; secrets removed from logs and e-mails; IPN processing serialised; new minimums PHP 8.2, WordPress 7.0, WooCommerce 11.1 with admin advisories for unpatched versions. Bug fixes: Capture Charge no longer stores an empty token from a failed first attempt (7577); changing the card on a subscription keeps it a subscription under HPOS/object cache, takes it off manual renewal and charges renewals to the new card (7610). Renewal orders store their deal and document numbers so the Cardcom refund/cancel actions work on them.
+Version: 3.6.0.1
+Changes: 3.6.0.1 - payments are accepted when the Cardcom terminal setting changes the operation (suspended J5 deal, charge, or saved card with J5 hold) instead of failing with "operation mismatch"; result 701 (J5) counts as success; Capture Charge orders charged directly are completed and not captured again; empty Order Status on Capture Charge means on-hold; order payment details visible again. 3.6.0.0 - security hardening release -saved cards only usable by their logged-in owner; payment results verified against the order (payment page, operation, amount, currency); subscription card changes require the owner; secrets removed from logs and e-mails; IPN processing serialised; new minimums PHP 8.2, WordPress 7.0, WooCommerce 11.1 with admin advisories for unpatched versions. Bug fixes: Capture Charge no longer stores an empty token from a failed first attempt (7577); changing the card on a subscription keeps it a subscription under HPOS/object cache, takes it off manual renewal and charges renewals to the new card (7610). Renewal orders store their deal and document numbers so the Cardcom refund/cancel actions work on them.
 Author: CardCom
 Author URI: http://www.cardcom.co.il
 Requires at least: 7.0
@@ -179,7 +179,7 @@ function woocommerce_cardcom_init()
         static $IsActivateInvoiceForPaypal;
         static $SendToEmailInvoiceForPaypal;
         static $debug_logging;
-        static $plugin = "WOO-3.6.0.0";
+        static $plugin = "WOO-3.6.0.1";
         static $CardComURL = 'https://secure.cardcom.solutions'; // Production URL
 
         //declaring properties because dynamic properties are no longer supported in PHP 8.2
@@ -260,6 +260,11 @@ function woocommerce_cardcom_init()
             $this->maxpayment = $this->settings['maxpayment'] ?? '1';
             $this->UseIframe = $this->settings['UseIframe'] ?? '0';
             $this->OrderStatus = $this->settings['OrderStatus'] ?? 'completed';
+            if ($this->OrderStatus === '') {
+                // admin/cardcom.js shows "on-hold" but disables the field for Capture Charge (6); disabled fields
+                // are not posted, so the setting is saved empty. Use what the screen showed.
+                $this->OrderStatus = $this->operation === '6' ? 'on-hold' : 'completed';
+            }
             $this->InvoiceVATFREE = $this->settings['InvoiceVATFREE'] ?? '2';
             // $this->failedUrl = $this->settings['failedUrl'];
             // $this->successUrl = $this->settings['successUrl'];
@@ -2100,9 +2105,11 @@ function woocommerce_cardcom_init()
         {
             $exact = array('CardcomToken', 'CardcomTokenId', 'CardcomToken_expiry_year', 'CardcomToken_expiry_month',
                 'CardcomTokenExDate', 'cardcom_token_val', 'cardcom_Tokef', 'cardcom_Approval_Num', 'cardcom_CardOwnerID',
-                'cardcom_CardOwnerEmail', 'cardcom_CardOwnerName', 'cardcom_NumOfPayments', 'Profile');
-            $exact = array_merge($exact, array('cc_number', 'cc_holdername', 'cc_numofpayments', 'cc_firstpayment', 'cc_paymenttype',
-                'cc_total', 'cc_cardtype', 'cc_Sulac', 'cc_Mutag', 'cc_Tokef'));
+                'cardcom_CardOwnerEmail', 'cardcom_CardOwnerName', 'Profile',
+                'cc_number', 'cc_holdername', 'cc_Tokef');
+            // Deliberately NOT hidden: the payment summary merchants read on the order (cardcom_NumOfPayments,
+            // cc_numofpayments, cc_firstpayment, cc_paymenttype, cc_total, cc_cardtype, cc_Sulac, cc_Mutag).
+            // It is not a card credential, and hiding it in 3.6.0.0 left merchants without the number of payments.
             if (in_array($meta_key, $exact, true)) {
                 return true;
             }
@@ -2111,7 +2118,9 @@ function woocommerce_cardcom_init()
 
         /**
          * True only when a LowProfile indicator result belongs to the LowProfile this plugin last issued
-         * for the order: same code, same operation, same amount and currency.
+         * for the order: same code, same operation, same amount and currency. A different operation is accepted
+         * only when CardCom's terminal setting (LowProfileDef.ChangeOperation) charged or held the card; $override
+         * then says what CardCom did.
          *
          * Amount: ExtShvaParams.Sum36 is the card-processor sum in agorot (minor units). It is absent when no
          * card transaction ran; that is only acceptable for token-only (3) and suspended (4) operations.
@@ -2123,10 +2132,12 @@ function woocommerce_cardcom_init()
          * @param WC_Order $order
          * @param string   $lpc      LowProfile code the IPN claims
          * @param string   $reason   Set to the first mismatching field
+         * @param string   $override Set when the operation differs: 'charge', 'suspended' or 'j5_token'; '' otherwise
          * @return bool
          */
-        private static function lowprofile_result_matches_order($response, $order, $lpc, &$reason = '')
+        private static function lowprofile_result_matches_order($response, $order, $lpc, &$reason = '', &$override = '')
         {
+            $override = '';
             $actual_op = isset($response['Operation']) ? (string)$response['Operation'] : '';
             $issued = json_decode((string)$order->get_meta('_cardcom_lp_codes'), true);
             if (!is_array($issued)) {
@@ -2169,12 +2180,27 @@ function woocommerce_cardcom_init()
             }
             // 2. Same operation we asked for (blocks token-only / validate-only pages for a charge).
             if (isset($entry['op']) && $entry['op'] !== '' && $actual_op !== (string)$entry['op']) {
-                $reason = 'operation mismatch';
-                return false;
+                // CardCom can override the operation per terminal (LowProfileDef.ChangeOperation). Its OperationResponse
+                // is the result of the operation it actually ran and the caller already required it to be a success,
+                // so a charge (1, 2) or suspended deal (4) is accepted. Token-only (3) instead of a charge or hold is
+                // accepted only with a successful J5 hold (Status1 701, LowProfileDef.ChangeJType=5): card saved and
+                // amount held, i.e. a Capture Charge order. Token-only without a hold (no money moved) is rejected.
+                if (in_array($actual_op, array('1', '2'), true)) {
+                    $override = 'charge';
+                } elseif ($actual_op === '4') {
+                    $override = 'suspended';
+                } elseif ($actual_op === '3' && (string)($response['ExtShvaParams_Status1'] ?? '') === '701') {
+                    $override = 'j5_token';
+                } else {
+                    $reason = 'operation mismatch';
+                    return false;
+                }
             }
             // 3. The page's amount and currency must still be what the order bills now (cart may have changed).
+            // Skipped only for a real token / Capture Charge page (3): nothing is charged now and the capture uses the
+            // order total. A page CardCom charged or held instead (override) is checked like a charge page.
             $op = (isset($entry['op']) && $entry['op'] !== '') ? (string)$entry['op'] : $actual_op;
-            if ($op !== '3') {
+            if ($op !== '3' || $override !== '') {
                 $now = self::initInvoice($order->get_id());
                 $now_sum = isset($now['SumToBill']) ? number_format((float)$now['SumToBill'], 2, '.', '') : '';
                 if (number_format((float)$entry['sum'], 2, '.', '') !== $now_sum) {
@@ -2194,10 +2220,18 @@ function woocommerce_cardcom_init()
                 }
             }
             // 4. Processor amount (agorot): informational until verified live for every payment type.
-            if ($op !== '3' && isset($response['ExtShvaParams_Sum36']) && $response['ExtShvaParams_Sum36'] !== ''
+            if (($op !== '3' || $override !== '') && isset($response['ExtShvaParams_Sum36']) && $response['ExtShvaParams_Sum36'] !== ''
                 && (int)$response['ExtShvaParams_Sum36'] !== (int)round(((float)$entry['sum']) * 100)) {
                 $order->add_order_note(sprintf(__('Cardcom reported a processor amount of %s (agorot) for a payment page of %s. Please verify the deal in Cardcom.', 'cardcom'),
                     (int)$response['ExtShvaParams_Sum36'], $entry['sum']));
+            }
+            // Written only once every check passed, so a rejected result never carries an override note.
+            if ($override === 'j5_token') {
+                $order->add_order_note(__('Cardcom saved the card and placed a J5 hold for this payment instead of charging it (Cardcom terminal setting). The order waits for capture, like a Capture Charge order.', 'cardcom'));
+            } elseif ($override === 'suspended') {
+                $order->add_order_note(__('Cardcom created a suspended deal for this payment (the Cardcom terminal is set to turn payments into suspended deals). The card was approved but not charged yet; execute the suspended deal in Cardcom.', 'cardcom'));
+            } elseif ($override === 'charge') {
+                $order->add_order_note(sprintf(__('Cardcom charged this payment with operation %1$s instead of the requested %2$s (Cardcom terminal setting).', 'cardcom'), $actual_op, (string)$entry['op']));
             }
             return true;
         }
@@ -2753,7 +2787,7 @@ function woocommerce_cardcom_init()
             $returnvalue = '1';
             parse_str($body, $responseArray);
             self::cardcom_log($log_title, "ResponseCode : " . $responseArray['ResponseCode']);
-            self::cardcom_log($log_title, "DealResponse : " . $responseArray['DealResponse']);
+            self::cardcom_log($log_title, "DealResponse : " . ($responseArray['DealResponse'] ?? ($responseArray['SuspendedDealResponseCode'] ?? '')));
             self::cardcom_log($log_title, "Response Description : " . $responseArray['Description']);
             self::cardcom_log_wc( 'cardcom-response', $responseArray );
             $this->InternalDealNumberPro = 0;
@@ -2777,13 +2811,29 @@ function woocommerce_cardcom_init()
 
 
             if (isset($responseArray['OperationResponse'])
-                && $responseArray['OperationResponse'] == '0'
+                && in_array((string)$responseArray['OperationResponse'], array('0', '701'), true) // 701 = J5 approval
                 && isset($responseArray['ReturnValue'])
                 && $responseArray['ReturnValue'] == $order_id) #  Normal Deal
             {
                 $mismatch = '';
-                if (self::lowprofile_result_matches_order($responseArray, $order, (string)$lpc, $mismatch)) {
+                $override = '';
+                if (self::lowprofile_result_matches_order($responseArray, $order, (string)$lpc, $mismatch, $override)) {
                     $returnvalue = '0';
+                    // Only when CardCom's terminal setting changed the operation (never for a Save Token store or a
+                    // subscription card change, whose pages are token-only by design).
+                    if ($override === 'j5_token' && !$isSetToCaptureCharge) {
+                        // A charge page that CardCom turned into token + J5 hold: run the Capture Charge flow so the
+                        // held amount can be captured with the saved card.
+                        $isSetToCaptureCharge = true;
+                        $order->update_meta_data('_set_Capture_Charge', '1');
+                        $order->save();
+                    } elseif (($override === 'charge' || $override === 'suspended') && $isSetToCaptureCharge) {
+                        // CardCom's terminal setting charged or held the card instead of saving it: the order is
+                        // paid now, so it must not wait for (or later get) a capture charge.
+                        $isSetToCaptureCharge = false;
+                        $order->delete_meta_data('_set_Capture_Charge');
+                        $order->save();
+                    }
                 } else {
                     self::cardcom_log($log_title, "LowProfile result rejected for order " . $order_id . ": " . $mismatch);
                     $order->add_order_note(sprintf(__('Cardcom payment result rejected (%s). The customer may have paid an outdated payment page; please verify the deal in Cardcom before shipping.', 'cardcom'), $mismatch));
