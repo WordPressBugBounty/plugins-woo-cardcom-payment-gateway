@@ -3,8 +3,8 @@
 Plugin Name: CardCom Payment Gateway
 Plugin URI: https://support.cardcom.solutions/hc/he/articles/360007128393-%D7%97%D7%99%D7%91%D7%95%D7%A8-%D7%94%D7%A1%D7%9C%D7%99%D7%A7%D7%94-%D7%9C%D7%97%D7%A0%D7%95%D7%AA-%D7%95%D7%95%D7%A8%D7%93%D7%A4%D7%A8%D7%A1-Wordpress-Woocommerce-Payment-WOO
 Description: CardCom Payment gateway for Woocommerce
-Version: 3.6.0.1
-Changes: 3.6.0.1 - payments are accepted when the Cardcom terminal setting changes the operation (suspended J5 deal, charge, or saved card with J5 hold) instead of failing with "operation mismatch"; result 701 (J5) counts as success; Capture Charge orders charged directly are completed and not captured again; empty Order Status on Capture Charge means on-hold; order payment details visible again. 3.6.0.0 - security hardening release -saved cards only usable by their logged-in owner; payment results verified against the order (payment page, operation, amount, currency); subscription card changes require the owner; secrets removed from logs and e-mails; IPN processing serialised; new minimums PHP 8.2, WordPress 7.0, WooCommerce 11.1 with admin advisories for unpatched versions. Bug fixes: Capture Charge no longer stores an empty token from a failed first attempt (7577); changing the card on a subscription keeps it a subscription under HPOS/object cache, takes it off manual renewal and charges renewals to the new card (7610). Renewal orders store their deal and document numbers so the Cardcom refund/cancel actions work on them.
+Version: 3.6.0.2
+Changes: 3.6.0.2 - installment commission (Cardcom terminal commissions on customer) is added to the order as a "Payment commission" fee line, so the order total, the Capture Charge amount and its invoice include it (bugs 7719/7720). 3.6.0.1 - payments are accepted when the Cardcom terminal setting changes the operation (suspended J5 deal, charge, or saved card with J5 hold) instead of failing with "operation mismatch"; result 701 (J5) counts as success; Capture Charge orders charged directly are completed and not captured again; empty Order Status on Capture Charge means on-hold; order payment details visible again. 3.6.0.0 - security hardening release -saved cards only usable by their logged-in owner; payment results verified against the order (payment page, operation, amount, currency); subscription card changes require the owner; secrets removed from logs and e-mails; IPN processing serialised; new minimums PHP 8.2, WordPress 7.0, WooCommerce 11.1 with admin advisories for unpatched versions. Bug fixes: Capture Charge no longer stores an empty token from a failed first attempt (7577); changing the card on a subscription keeps it a subscription under HPOS/object cache, takes it off manual renewal and charges renewals to the new card (7610). Renewal orders store their deal and document numbers so the Cardcom refund/cancel actions work on them.
 Author: CardCom
 Author URI: http://www.cardcom.co.il
 Requires at least: 7.0
@@ -179,7 +179,7 @@ function woocommerce_cardcom_init()
         static $IsActivateInvoiceForPaypal;
         static $SendToEmailInvoiceForPaypal;
         static $debug_logging;
-        static $plugin = "WOO-3.6.0.1";
+        static $plugin = "WOO-3.6.0.2";
         static $CardComURL = 'https://secure.cardcom.solutions'; // Production URL
 
         //declaring properties because dynamic properties are no longer supported in PHP 8.2
@@ -2220,8 +2220,11 @@ function woocommerce_cardcom_init()
                 }
             }
             // 4. Processor amount (agorot): informational until verified live for every payment type.
+            // A higher amount on an installment payment is the terminal's installment commission, which
+            // apply_payment_commission() adds to the order instead (bugs 7719/7720).
             if (($op !== '3' || $override !== '') && isset($response['ExtShvaParams_Sum36']) && $response['ExtShvaParams_Sum36'] !== ''
-                && (int)$response['ExtShvaParams_Sum36'] !== (int)round(((float)$entry['sum']) * 100)) {
+                && (int)$response['ExtShvaParams_Sum36'] !== (int)round(((float)$entry['sum']) * 100)
+                && !((int)($response['NumOfPayments'] ?? 0) > 1 && (int)$response['ExtShvaParams_Sum36'] > (int)round(((float)$entry['sum']) * 100))) {
                 $order->add_order_note(sprintf(__('Cardcom reported a processor amount of %s (agorot) for a payment page of %s. Please verify the deal in Cardcom.', 'cardcom'),
                     (int)$response['ExtShvaParams_Sum36'], $entry['sum']));
             }
@@ -2234,6 +2237,66 @@ function woocommerce_cardcom_init()
                 $order->add_order_note(sprintf(__('Cardcom charged this payment with operation %1$s instead of the requested %2$s (Cardcom terminal setting).', 'cardcom'), $actual_op, (string)$entry['op']));
             }
             return true;
+        }
+
+        /**
+         * Installment commission (bugs 7719/7720). When the Cardcom terminal charges the customer a commission for
+         * installments (TermianlCommissions, "commissions on customer"), the payment page approves/charges/holds
+         * more than the order total. Cardcom's own document already has a commission line, but the WooCommerce order
+         * kept the original total, so a Capture Charge later charged only the original total and a suspended deal's
+         * order did not match the deal. Adds the difference to the order as a non-taxable fee line, so the order
+         * total, the capture amount and the capture invoice (fee lines become invoice lines) all include it.
+         *
+         * The amount actually approved is ExtShvaParams_Sum36 (agorot, any deal with a card transaction) or
+         * SuspendedDealSumToBill (major units, suspended deals; the only amount for a J2 suspended deal).
+         * Only for installments (NumOfPayments > 1) and only a higher amount: anything else is not a commission.
+         *
+         * @param WC_Order $order
+         * @param array    $response BillGoldGetLowProfileIndicator response
+         */
+        private function apply_payment_commission($order, $response)
+        {
+            if ((int)($response['NumOfPayments'] ?? 0) <= 1) {
+                return;
+            }
+            // A suspended deal's own sum first: a J2 check reports no (or a zero) processor sum.
+            $approved_agorot = 0;
+            if (isset($response['SuspendedDealSumToBill']) && is_numeric($response['SuspendedDealSumToBill'])) {
+                $approved_agorot = (int)round((float)$response['SuspendedDealSumToBill'] * 100);
+            } elseif (isset($response['ExtShvaParams_Sum36']) && is_numeric($response['ExtShvaParams_Sum36'])) {
+                $approved_agorot = (int)$response['ExtShvaParams_Sum36'];
+            }
+            if ($approved_agorot <= 0) {
+                return;
+            }
+            // Once per order: a commission line already added by an earlier result is never added again.
+            foreach ($order->get_items('fee') as $fee_item) {
+                if ($fee_item->get_meta('_cardcom_payment_commission') === '1') {
+                    return;
+                }
+            }
+            $order_agorot = (int)round((float)$order->get_total() * 100);
+            $diff_agorot = $approved_agorot - $order_agorot;
+            if ($diff_agorot <= 0) {
+                return;
+            }
+            $diff = round($diff_agorot / 100, 2);
+            $name = ($this->lang === 'he') ? 'סה"כ עמלה בגין פריסת תשלומים' : __('Payment commission', 'cardcom');
+
+            $fee = new WC_Order_Item_Fee();
+            $fee->set_name($name);
+            $fee->set_amount($diff);
+            $fee->set_total($diff);
+            $fee->set_tax_status('none');
+            $fee->add_meta_data('_cardcom_payment_commission', '1', true);
+            $order->add_item($fee);
+            // Totals are set directly: calculate_totals() would re-run tax and coupon logic on an order that is
+            // already paid/approved at the original total.
+            $order->set_total(round((float)$order->get_total() + $diff, 2));
+            $order->add_order_note(sprintf(__('Cardcom added an installment commission of %1$s for %2$s payments. The order total was updated to %3$s.', 'cardcom'),
+                number_format($diff, 2, '.', ''), (int)$response['NumOfPayments'], number_format((float)$order->get_total(), 2, '.', '')));
+            $order->save();
+            self::cardcom_log('apply_payment_commission', "Order " . $order->get_id() . ": commission " . number_format($diff, 2, '.', '') . " added");
         }
 
         /**
@@ -2923,6 +2986,8 @@ function woocommerce_cardcom_init()
                 $order->update_meta_data( 'Profile', $lpc );
                 $order->save();
 
+                // Before payment_complete() / the capture data: the order must bill what the customer approved.
+                $this->apply_payment_commission($order, $responseArray);
             }
             // Only persist Capture-Charge data for a successful LowProfile result. A failed attempt
             // (e.g. an unsupported card brand, then a retry with another card) fires its own IPN with

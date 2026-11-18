@@ -5,7 +5,7 @@ Tags: woocommerce, payment-gateway, checkout
 Requires at least: 7.0
 Requires PHP: 8.2
 Tested up to: 7.1
-Stable tag: 3.6.0.1
+Stable tag: 3.6.0.2
 License: GPLv2 or later
 License URI: https://secure.cardcom.co.il/Html/agreement/agreement.htm
 
@@ -129,6 +129,9 @@ Please advise [relevant support article](https://support.cardcom.solutions/hc/he
 
 == Changelog ==
 
+= 3.6.0.2 =
+* Fix: when the Cardcom terminal charges the customer a commission for installments, the commission was not added to the WooCommerce order. Capture Charge orders were later charged without the commission, and suspended-deal orders showed a lower total than the deal. The commission is now added to the order as a "Payment commission" fee line (no tax), so the order total, the Capture Charge amount and its invoice include it.
+
 = 3.6.0.1 =
 * Fix: on Cardcom terminals set to change the payment operation (for example turning every payment into a J5 suspended deal), 3.6.0.0 marked successful payments as failed ("operation mismatch") and the customer received a failed-order e-mail. Payments are now accepted when Cardcom charged the card, created a suspended deal, or saved the card with a J5 hold, and an order note says what Cardcom did. A result that only saved the card without charging or holding it is still rejected.
 * Fix: result codes 0 and 701 (successful J5) are both treated as a successful payment, as before 3.6.0.0.
@@ -148,6 +151,9 @@ Please advise [relevant support article](https://support.cardcom.solutions/hc/he
 Please advise the [plugin development log](https://plugins.trac.wordpress.org/log/woo-cardcom-payment-gateway/) for changes.
 
 == Upgrade notice ==
+
+= 3.6.0.2 =
+Important for stores with installment commissions on the Cardcom terminal using Capture Charge or suspended deals: the commission was not charged.
 
 = 3.6.0.1 =
 Important for stores whose Cardcom terminal turns payments into suspended (J5) deals or changes the payment operation: 3.6.0.0 marked these payments as failed. Also shows the order's payment details in the Custom Fields box again.
